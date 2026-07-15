@@ -1028,10 +1028,17 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     break;
   }
 
+  case NAMEOID: {
+    const char *str = JS_ToCString(ctx, val);
+    Datum ret = DirectFunctionCall1(namein, CStringGetDatum(str));
+    JS_FreeCString(ctx, str);
+    return ret;
+    break;
+  }
+
   case TEXTOID:
   case VARCHAROID:
   case BPCHAROID:
-  case NAMEOID:
   case XMLOID: {
     size_t plen;
     const char *str = JS_ToCStringLen(ctx, &plen, val);
