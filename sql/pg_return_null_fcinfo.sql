@@ -1,0 +1,28 @@
+-- Regression test for the NULL-fcinfo crash in pljs_jsvalue_to_datum().
+--
+-- pljs.execute() binds its parameters by calling pljs_jsvalue_to_datum() with
+-- fcinfo == NULL (see pljs_execute_params()). Before the fix, two call sites
+-- used PG_RETURN_NULL(), which expands to `fcinfo->isnull = true; return ...`
+-- and therefore dereferences the NULL fcinfo and crashes the backend:
+--   1. the bytea "unknown array type" fallback -- reached when a value bound to
+--      bytea is not a recognised typed array / ArrayBuffer / string (e.g. a
+--      plain object or an unhandled Float64Array), and
+--   2. the switch catch-all -- reached when a non-Date value is bound to
+--      date / timestamp.
+-- With the fix both set *is_null and return (Datum) 0, i.e. bind SQL NULL.
+-- A clean run (the backend survives and the binds become NULL) is the assertion;
+-- without the fix these statements take the connection down.
+
+-- site 1: unrecognised "binary" JS value bound to bytea
+DO $$
+  const o = pljs.execute('SELECT $1::bytea AS b', [ {} ])[0].b;
+  const f = pljs.execute('SELECT $1::bytea AS b', [ new Float64Array([1, 2]) ])[0].b;
+  pljs.elog(NOTICE, 'bytea fallback null: ' + (o === null) + ' ' + (f === null));
+$$ LANGUAGE pljs;
+
+-- site 2: non-Date JS value bound to date / timestamp
+DO $$
+  const d = pljs.execute('SELECT $1::date AS d', [ 12345 ])[0].d;
+  const t = pljs.execute('SELECT $1::timestamp AS t', [ {} ])[0].t;
+  pljs.elog(NOTICE, 'date/timestamp fallback null: ' + (d === null) + ' ' + (t === null));
+$$ LANGUAGE pljs;

@@ -1197,7 +1197,8 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
         }
       }
 
-      PG_RETURN_NULL();
+      if (is_null) { *is_null = true; }
+      return (Datum) 0;
     }
   }
 
@@ -1222,7 +1223,8 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
   }
 
   // shut up, compiler
-  PG_RETURN_NULL();
+  if (is_null) { *is_null = true; }
+  return (Datum) 0;
 }
 
 /**
