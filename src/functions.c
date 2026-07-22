@@ -227,7 +227,7 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
     {
       MemoryContextSwitchTo(m_mcontext);
       ErrorData *edata = CopyErrorData();
-      JSValue error = js_throw(edata->message, ctx);
+      JSValue error = js_throw_error_data(edata, ctx);
       FlushErrorState();
       FreeErrorData(edata);
 
@@ -298,7 +298,7 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
     MemoryContextSwitchTo(m_mcontext);
 
     ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw(edata->message, ctx);
+    JSValue error = js_throw_error_data(edata, ctx);
 
     RollbackAndReleaseCurrentSubTransaction();
     MemoryContextSwitchTo(m_mcontext);
@@ -481,7 +481,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
   {
     MemoryContextSwitchTo(m_mcontext);
     ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw(edata->message, ctx);
+    JSValue error = js_throw_error_data(edata, ctx);
 
     RollbackAndReleaseCurrentSubTransaction();
     CurrentResourceOwner = m_resowner;
