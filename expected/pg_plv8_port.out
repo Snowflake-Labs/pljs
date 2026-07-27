@@ -1,0 +1,100 @@
+-- Differential port of plv8's regression scenarios to pljs.
+--
+-- Source (PostgreSQL License, same as pljs): plv8's sql/scalar_args.sql,
+-- sql/varparam.sql and sql/bytea.sql. QuickJS (pljs) matches V8 (plv8) on these
+-- cases except for two behaviours called out below and recorded in
+-- pljs-patches/PROVENANCE.md: prepare() parameter-type deduction and the bytea
+-- *result* representation. Function names are prefixed pp_ to avoid clashing
+-- with pljs's own bytea regression test. This guards the plv8-compatible surface
+-- the snowflake_cdc procedures depend on.
+-- scalar_args: jsonb scalars and containers round-trip through a pljs argument
+-- (matches plv8 byte for byte).
+CREATE FUNCTION pp_jsonb_scalar_cat(data jsonb) RETURNS jsonb LANGUAGE pljs AS
+$$ pljs.elog(NOTICE, 'arg = ' + JSON.stringify(data)); return data; $$;
+SELECT pp_jsonb_scalar_cat(to_jsonb('asd'::TEXT));
+NOTICE:  arg = "asd"
+ pp_jsonb_scalar_cat 
+---------------------
+ "asd"
+(1 row)
+
+SELECT pp_jsonb_scalar_cat(to_jsonb(19450509::INT));
+NOTICE:  arg = 19450509
+ pp_jsonb_scalar_cat 
+---------------------
+ 19450509
+(1 row)
+
+SELECT pp_jsonb_scalar_cat(to_jsonb(false::BOOL));
+NOTICE:  arg = false
+ pp_jsonb_scalar_cat 
+---------------------
+ false
+(1 row)
+
+SELECT pp_jsonb_scalar_cat('{"key":[null, true, false, 19450509, "string"]}'::JSONB);
+NOTICE:  arg = {"key":[null,true,false,19450509,"string"]}
+               pp_jsonb_scalar_cat                
+--------------------------------------------------
+ {"key": [null, true, false, 19450509, "string"]}
+(1 row)
+
+SELECT pp_jsonb_scalar_cat('{"key":null}'::JSONB);
+NOTICE:  arg = {"key":null}
+ pp_jsonb_scalar_cat 
+---------------------
+ {"key": null}
+(1 row)
+
+DROP FUNCTION pp_jsonb_scalar_cat(jsonb);
+-- varparam: prepare()/execute()/cursor() and variadic execute arguments (bare
+-- value, one-element array, and multiple bare values) match plv8.
+-- DIVERGENCE (see PROVENANCE.md): plv8 deduces prepared-statement parameter
+-- types from the query; pljs requires them to be given to prepare(), so this
+-- passes the explicit type list ["oid"] that plv8's varparam.sql omits.
+DO LANGUAGE pljs $$
+  var plan = pljs.prepare("SELECT relname FROM pg_class WHERE oid = $1", ["oid"]);
+  pljs.elog(INFO, plan.execute(["1259"]).shift().relname);
+  var cur = plan.cursor(["2610"]);
+  pljs.elog(INFO, cur.fetch().relname);
+  cur.close();
+  plan.free();
+$$;
+INFO:  pg_class
+INFO:  pg_index
+DO LANGUAGE pljs $$
+  pljs.elog(INFO, JSON.stringify(pljs.execute("SELECT $1", 1)));
+  pljs.elog(INFO, JSON.stringify(pljs.execute("SELECT $1", [1])));
+  pljs.elog(INFO, JSON.stringify(pljs.execute("SELECT $1 a, $2 b", 1, 2)));
+$$;
+INFO:  [{"?column?":"1"}]
+INFO:  [{"?column?":"1"}]
+INFO:  [{"a":"1","b":"2"}]
+-- bytea (return path): a typed array / ArrayBuffer returned from a pljs function
+-- becomes a bytea of the corresponding byte length -- matches plv8.
+CREATE FUNCTION pp_arraybuffer_bytea(len integer) RETURNS bytea LANGUAGE pljs IMMUTABLE STRICT AS $$ return new ArrayBuffer(len); $$;
+SELECT length(pp_arraybuffer_bytea(20));
+ length 
+--------
+     20
+(1 row)
+
+CREATE FUNCTION pp_int16array_bytea(len integer) RETURNS bytea LANGUAGE pljs IMMUTABLE STRICT AS $$ return new Int16Array(len); $$;
+SELECT length(pp_int16array_bytea(20));
+ length 
+--------
+     40
+(1 row)
+
+DROP FUNCTION pp_arraybuffer_bytea(integer);
+DROP FUNCTION pp_int16array_bytea(integer);
+-- bytea (result path) DIVERGENCE: plv8 surfaces a bytea result column as an
+-- ArrayBuffer/typed array, so plv8's bytea.sql reads it with
+-- String.fromCharCode.apply(null, bytea). pljs surfaces it as a JS string, so
+-- that idiom throws ("not a object") on pljs. We pin pljs's actual behaviour
+-- (typeof === 'string') rather than porting plv8's expected. See PROVENANCE.md.
+DO LANGUAGE pljs $$
+  const b = pljs.execute("select 'abc'::bytea AS x")[0].x;
+  pljs.elog(NOTICE, 'bytea result typeof=' + (typeof b) + ' value=' + b);
+$$;
+NOTICE:  bytea result typeof=string value=abc
