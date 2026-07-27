@@ -1,0 +1,24 @@
+-- Scenario extrapolated from mature PLs (plpython's subtransaction test and
+-- plpgsql's exception blocks) rewritten for pljs.
+--
+-- pljs wraps each pljs.execute() in an SPI subtransaction, so a caught error
+-- rolls back only the failing statement while earlier successful statements in
+-- the same function persist and later statements proceed -- the behaviour the
+-- snowflake_cdc procedures rely on when they try an operation and recover. This
+-- also depends on the 0002 FlushErrorState fix (the catch must leave the error
+-- stack clean for the following statements).
+CREATE TABLE t_subxact (id int PRIMARY KEY, v text);
+CREATE FUNCTION f_subxact() RETURNS int LANGUAGE pljs AS $$
+  pljs.execute("INSERT INTO t_subxact VALUES (1, 'a')");
+  try {
+    pljs.execute("INSERT INTO t_subxact VALUES (1, 'dup')");   // PK violation: this stmt rolls back
+  } catch (e) {
+    pljs.elog(NOTICE, 'caught dup=' + /duplicate key/.test(e.message) + ' sqlstate=' + e.sqlerrcode);
+  }
+  pljs.execute("INSERT INTO t_subxact VALUES (2, 'b')");        // proceeds normally
+  return pljs.execute("SELECT count(*)::int AS c FROM t_subxact")[0].c;
+$$;
+SELECT f_subxact() AS surviving_rows;
+SELECT id, v FROM t_subxact ORDER BY id;
+DROP FUNCTION f_subxact();
+DROP TABLE t_subxact;
