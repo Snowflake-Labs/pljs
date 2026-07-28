@@ -48,7 +48,7 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_cdc_null_matrix currentresource pg_prepared_statements pg_datetime \
 	pg_type_conversions_extra pg_record_setof pg_error_surface \
 	pg_json_undefined pg_bigint_semantics pg_es6 pg_dropped_column \
-	pg_spi_utility
+	pg_spi_utility pg_typedarray_views
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 
