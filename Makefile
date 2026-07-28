@@ -45,7 +45,7 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_prepared_plan_lifetime pg_bigint_lsn pg_bool_coercion pg_rich_types \
 	pg_nested_error_envelope pg_plv8_port pg_subxact_isolation \
 	pg_cdc_int8_boundary pg_cdc_text pg_cdc_bool pg_cdc_jsonb pg_cdc_uuid \
-	pg_cdc_null_matrix
+	pg_cdc_null_matrix currentresource
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 
