@@ -1,0 +1,23 @@
+-- snowflake_cdc type-boundary matrix: uuid-as-text.
+--
+-- The mirror procedures mint mirror ids with gen_random_uuid()::text
+-- (postgres/adapter.js newMirrorIdSqlExpr) and always surface uuids as text,
+-- conversion in the shape the procedures need. This pins the text form the
+-- procedures depend on: the gen_random_uuid()::text shape, a text-uuid
+-- comparison against a uuid column, and the exact bare-uuid result behaviour
+-- (recorded in PROVENANCE.md) so a caller can rely on ::text.
+DO $$
+  const id = pljs.execute('SELECT gen_random_uuid()::text AS id')[0].id;
+  pljs.elog(NOTICE, 'gen uuid::text: type=' + (typeof id) + ' len=' + id.length +
+                    ' dashes=' + (id.split('-').length - 1));
+
+  const fixed = '11111111-2222-3333-4444-555555555555';
+  const eq = pljs.execute('SELECT ($1::uuid = $2::uuid) AS e', [fixed, fixed])[0].e;
+  pljs.elog(NOTICE, 'text-uuid compare eq=' + eq);
+
+  // Pin the exact bare-uuid result behaviour vs the ::text form callers use.
+  const bare = pljs.execute("SELECT '11111111-2222-3333-4444-555555555555'::uuid AS u")[0].u;
+  const astext = pljs.execute("SELECT '11111111-2222-3333-4444-555555555555'::uuid::text AS u")[0].u;
+  pljs.elog(NOTICE, 'bare uuid: typeof=' + (typeof bare) + ' eq_fixed=' + (bare === fixed) +
+                    ' ::text eq_fixed=' + (astext === fixed));
+$$ LANGUAGE pljs;

@@ -1,0 +1,41 @@
+-- snowflake_cdc type-boundary matrix: json / jsonb (extends pg_rich_types).
+--
+-- The mirror procedures move structured metadata across the JS boundary two
+-- ways: (1) DATA_COLUMNS / PK_COLUMNS arrive as a text/json column and are
+-- JSON.parse'd in JS (apply_change_batches/helpers.js:284-285); (2) operation
+-- descriptions and payloads round-trip as jsonb. The adapter also extracts a
+-- single field with the "->>'key'" idiom (extractJsonExpr). This pins parse-
+-- from-text, jsonb bind/read of nested + unicode + null values, the
+-- undefined-key omission that Object.assign relies on, the ->> extract, a large
+-- payload, and NULL jsonb.
+DO $$
+  // (1) DATA_COLUMNS/PK_COLUMNS pattern: text column carrying a JSON array.
+  const dc = pljs.execute("SELECT '[\"id\",\"name\",\"amount\"]'::text AS data_columns")[0];
+  const cols = JSON.parse(dc.data_columns);
+  pljs.elog(NOTICE, 'JSON.parse(text): len=' + cols.length + ' [1]=' + cols[1]);
+
+  // (2) jsonb bind + read: nested object/array, unicode, null value.
+  const payload = { a: 1, nested: { b: [2, 3], u: 'caf\u00e9_\ud83d\ude80' }, z: null };
+  const j = pljs.execute('SELECT $1::jsonb AS j', [payload])[0].j;
+  pljs.elog(NOTICE, 'roundtrip: a=' + j.a + ' b1=' + j.nested.b[1] +
+                    ' u=' + j.nested.u + ' zIsNull=' + (j.z === null));
+
+  // undefined key is dropped on serialization (Object.assign merge pattern).
+  const merged = Object.assign({}, { keep: 1 }, { drop: undefined });
+  const j2 = pljs.execute('SELECT $1::jsonb AS j', [merged])[0].j;
+  pljs.elog(NOTICE, 'undefined-drop: hasKeep=' + ('keep' in j2) + ' hasDrop=' + ('drop' in j2));
+
+  // ->>'key' extract idiom (extractJsonExpr) -> text.
+  const amt = pljs.execute("SELECT ($1::jsonb ->> 'amount') AS a", [{ amount: 42 }])[0].a;
+  pljs.elog(NOTICE, "extract ->>'amount' = " + amt + ' type=' + (typeof amt));
+
+  // NULL jsonb.
+  const nj = pljs.execute('SELECT $1::jsonb AS j', [null])[0].j;
+  pljs.elog(NOTICE, 'null jsonb: isNull=' + (nj === null));
+
+  // large payload round-trips by count.
+  const big = { arr: [] };
+  for (let i = 0; i < 500; i++) big.arr.push(i);
+  const jb = pljs.execute('SELECT $1::jsonb AS j', [big])[0].j;
+  pljs.elog(NOTICE, 'large: len=' + jb.arr.length + ' last=' + jb.arr[499]);
+$$ LANGUAGE pljs;

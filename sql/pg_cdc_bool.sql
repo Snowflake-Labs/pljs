@@ -1,0 +1,31 @@
+-- snowflake_cdc type-boundary matrix: boolean (extends pg_bool_coercion).
+--
+-- The mirror procedures deliberately do NOT bind a JS string into a bool
+-- context; instead they compare SQL-side with the "(? = 'true')" idiom (see
+-- apply_change_batches/helpers.js needs_snapshot and the MERGE VALUES list at
+-- helpers.js:218). A JS boolean also binds directly to a bool column. This
+-- pins the idiom across the inputs the changelog can carry, the direct-bind
+-- path, bool result reads, and the exact MERGE VALUES (... (? = 'true') ...)
+-- shape so the behaviour the procedures rely on cannot regress.
+DO $$
+  function idiom(x){ return pljs.execute("SELECT ($1 = 'true') AS b", [x])[0].b; }
+  for (const v of ['true', 'false', 't', '1', 'TRUE', '']) {
+    pljs.elog(NOTICE, "idiom '" + v + "' => " + idiom(v));
+  }
+  const nb = idiom(null);
+  pljs.elog(NOTICE, 'idiom null => ' + nb + ' isNull=' + (nb === null));
+
+  // direct JS boolean bind + read
+  const tt = pljs.execute('SELECT $1::bool AS v', [true])[0].v;
+  const ff = pljs.execute('SELECT $1::bool AS v', [false])[0].v;
+  pljs.elog(NOTICE, 'jsbool: t=' + tt + '(' + (typeof tt) + ') f=' + ff + '(' + (typeof ff) + ')');
+  const rb = pljs.execute('SELECT true AS v')[0].v;
+  pljs.elog(NOTICE, 'read bool=' + rb + ' type=' + (typeof rb));
+
+  // MERGE-style VALUES with (? = 'true') producing a bool column (helpers.js:218)
+  pljs.execute('CREATE TEMP TABLE cdc_bool_t (flag bool)');
+  pljs.execute("INSERT INTO cdc_bool_t VALUES (($1 = 'true'))", ['true']);
+  pljs.execute("INSERT INTO cdc_bool_t VALUES (($1 = 'true'))", ['false']);
+  const flags = pljs.execute('SELECT flag FROM cdc_bool_t ORDER BY flag').map(r => r.flag);
+  pljs.elog(NOTICE, 'inserted flags=' + flags.join(','));
+$$ LANGUAGE pljs;
