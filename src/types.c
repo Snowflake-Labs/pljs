@@ -1043,7 +1043,24 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     size_t plen;
     const char *str = JS_ToCStringLen(ctx, &plen, val);
 
-    Datum ret = CStringGetTextDatum(str);
+    if (str == NULL) {
+      elog(ERROR, "could not convert JavaScript value to a string");
+    }
+
+    /*
+     * A PostgreSQL text value cannot contain an embedded NUL.  CStringGetTextDatum
+     * uses strlen(), which would silently truncate a JS string at its first
+     * \u0000 -- turning "a\u0000b" into "a" and losing data without warning.
+     * Detect the NUL and raise a clear error instead of corrupting the value.
+     */
+    if (memchr(str, '\0', plen) != NULL) {
+      JS_FreeCString(ctx, str);
+      ereport(ERROR,
+              (errcode(ERRCODE_UNTRANSLATABLE_CHARACTER),
+               errmsg("null byte (\\u0000) is not allowed in a text value")));
+    }
+
+    Datum ret = PointerGetDatum(cstring_to_text_with_len(str, plen));
     JS_FreeCString(ctx, str);
 
     return ret;
@@ -1189,32 +1206,57 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
 
       return PointerGetDatum(buffer);
     } else {
-      elog(DEBUG3, "Unknown array type, tag: %lld", val.tag);
-      for (uint8_t i = 0; i < 255; i++) {
-        void *res = JS_GetOpaque(val, i);
-        if (res != NULL) {
-          elog(DEBUG3, "class_id: %d", i);
-        }
-      }
-
-      if (is_null) { *is_null = true; }
-      return (Datum) 0;
+      /*
+       * The value is not a typed array, ArrayBuffer, or string, so we have no
+       * meaningful byte representation for it.  Raise a clear error instead of
+       * silently returning SQL NULL, which used to hide binding mistakes (e.g.
+       * accidentally passing a number for a bytea parameter).
+       */
+      elog(ERROR,
+           "cannot convert JavaScript value to bytea: expected a string, "
+           "ArrayBuffer, or typed array");
     }
   }
 
   case DATEOID:
-    if (Is_Date(val)) {
-      double in;
-      JS_ToFloat64(ctx, &in, val);
-      return pljs_convert_epoch_to_date(in);
-    }
-    break;
   case TIMESTAMPOID:
   case TIMESTAMPTZOID:
     if (Is_Date(val)) {
       double in;
       JS_ToFloat64(ctx, &in, val);
-      return pljs_convert_epoch_to_timestamptz(in);
+      if (rettype == DATEOID) {
+        return pljs_convert_epoch_to_date(in);
+      } else {
+        return pljs_convert_epoch_to_timestamptz(in);
+      }
+    } else {
+      /*
+       * Not a JS Date object: bind through the type's text input function so a
+       * valid date/timestamp *string* (e.g. "2020-01-02 03:04:05") is parsed
+       * correctly instead of being silently coerced to NULL, and invalid input
+       * raises a clear error rather than vanishing.
+       */
+      size_t plen;
+      const char *str = JS_ToCStringLen(ctx, &plen, val);
+      Oid typinput, typioparam;
+      Datum ret;
+
+      if (str == NULL) {
+        elog(ERROR, "could not convert JavaScript value to a string");
+      }
+
+      if (memchr(str, '\0', plen) != NULL) {
+        JS_FreeCString(ctx, str);
+        ereport(ERROR,
+                (errcode(ERRCODE_UNTRANSLATABLE_CHARACTER),
+                 errmsg("null byte (\\u0000) is not allowed in a date/time value")));
+      }
+
+      getTypeInputInfo(rettype, &typinput, &typioparam);
+      ret = OidInputFunctionCall(typinput, (char *)str, typioparam, -1);
+      JS_FreeCString(ctx, str);
+
+      return ret;
     }
     break;
 

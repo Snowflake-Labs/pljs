@@ -1,0 +1,90 @@
+-- Regression: JS -> SQL conversions must never silently corrupt or drop data.
+--
+--   * An embedded NUL in a JS string used to truncate the text value at the
+--     first \u0000 (CStringGetTextDatum -> strlen), turning "a\u0000b" into "a"
+--     with no warning.  It now raises a clear error.
+--   * A valid date/timestamp *string* bound to a date/timestamp parameter used
+--     to become SQL NULL because only JS Date objects were handled.  It is now
+--     parsed through the type's input function, and invalid input raises a clear
+--     error instead of vanishing.
+--   * A value with no byte representation (e.g. a number) bound to bytea used to
+--     become SQL NULL.  It now raises a clear error.
+CREATE EXTENSION IF NOT EXISTS pljs;
+NOTICE:  extension "pljs" already exists, skipping
+-- 1) Embedded NUL in text: a clear error, not silent truncation, on return ...
+CREATE FUNCTION ret_nul() RETURNS text LANGUAGE pljs AS $$ return "a\u0000b"; $$;
+SELECT ret_nul();
+ERROR:  null byte (\u0000) is not allowed in a text value
+-- ... and on a text bind (the error is raised in SQL and surfaces to JS).
+CREATE FUNCTION bind_nul() RETURNS text LANGUAGE pljs AS $$
+  try { return pljs.execute("SELECT $1::text AS t", ["a\u0000b"])[0].t; }
+  catch (e) { return "err:" + e.message; }
+$$;
+SELECT bind_nul();
+                       bind_nul                        
+-------------------------------------------------------
+ err:null byte (\u0000) is not allowed in a text value
+(1 row)
+
+-- 2) date/timestamp *strings* are parsed, not dropped to NULL (compared inside
+-- SQL so the result is timezone independent).
+CREATE FUNCTION bind_ts_ok() RETURNS boolean LANGUAGE pljs AS $$
+  return pljs.execute(
+    "SELECT ($1::timestamp = '2020-01-02 03:04:05'::timestamp) AS ok",
+    ["2020-01-02 03:04:05"])[0].ok;
+$$;
+SELECT bind_ts_ok();
+ bind_ts_ok 
+------------
+ t
+(1 row)
+
+CREATE FUNCTION bind_date_ok() RETURNS boolean LANGUAGE pljs AS $$
+  return pljs.execute("SELECT ($1::date = '2020-01-02'::date) AS ok",
+                      ["2020-01-02"])[0].ok;
+$$;
+SELECT bind_date_ok();
+ bind_date_ok 
+--------------
+ t
+(1 row)
+
+-- invalid date/timestamp input raises a clear error (caught in JS).
+CREATE FUNCTION bind_ts_bad() RETURNS text LANGUAGE pljs AS $$
+  try { pljs.execute("SELECT $1::timestamp AS t", ["not-a-date"]); return "no error"; }
+  catch (e) { return "err:" + e.message; }
+$$;
+SELECT bind_ts_bad();
+                        bind_ts_bad                        
+-----------------------------------------------------------
+ err:invalid input syntax for type timestamp: "not-a-date"
+(1 row)
+
+-- 3) a value with no byte representation bound to bytea is a clear error ...
+CREATE FUNCTION bind_bytea_bad() RETURNS text LANGUAGE pljs AS $$
+  try { pljs.execute("SELECT $1::bytea AS b", [12345]); return "no error"; }
+  catch (e) { return "err:" + e.message; }
+$$;
+SELECT bind_bytea_bad();
+                                        bind_bytea_bad                                        
+----------------------------------------------------------------------------------------------
+ err:cannot convert JavaScript value to bytea: expected a string, ArrayBuffer, or typed array
+(1 row)
+
+-- ... but a string still binds to bytea just fine.
+CREATE FUNCTION bind_bytea_ok() RETURNS bytea LANGUAGE pljs AS $$
+  return pljs.execute("SELECT $1::bytea AS b", ["hello"])[0].b;
+$$;
+SELECT bind_bytea_ok();
+ bind_bytea_ok 
+---------------
+ \x68656c6c6f
+(1 row)
+
+DROP FUNCTION ret_nul();
+DROP FUNCTION bind_nul();
+DROP FUNCTION bind_ts_ok();
+DROP FUNCTION bind_date_ok();
+DROP FUNCTION bind_ts_bad();
+DROP FUNCTION bind_bytea_bad();
+DROP FUNCTION bind_bytea_ok();
