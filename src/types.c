@@ -18,6 +18,7 @@
 
 #include "pljs.h"
 
+#include <math.h>
 #include <string.h>
 
 /*
@@ -372,9 +373,26 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
   Datum *values;
   bool *nulls;
   int nelems;
+  ArrayType *arr = DatumGetArrayTypeP(arg);
 
-  deconstruct_array(DatumGetArrayTypeP(arg), type->typid, type->length,
-                    type->byval, type->align, &values, &nulls, &nelems);
+  /*
+   * pljs represents SQL arrays as flat JS arrays.  deconstruct_array() would
+   * happily flatten a multidimensional array into a single JS array, silently
+   * discarding the dimensionality (e.g. {{1,2},{3,4}} -> [1,2,3,4]) so a
+   * round-trip corrupts the value.  Reject multidimensional arrays with a clear
+   * error rather than losing the shape.
+   */
+  if (ARR_NDIM(arr) > 1) {
+    ereport(ERROR,
+            (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+             errmsg("cannot convert a multidimensional array to a JavaScript "
+                    "array"),
+             errdetail("pljs represents SQL arrays as one-dimensional JS "
+                       "arrays.")));
+  }
+
+  deconstruct_array(arr, type->typid, type->length, type->byval, type->align,
+                    &values, &nulls, &nelems);
 
   for (int i = 0; i < nelems; i++) {
     JSValue value =
@@ -1224,6 +1242,23 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     if (Is_Date(val)) {
       double in;
       JS_ToFloat64(ctx, &in, val);
+
+      /*
+       * An invalid JS Date (getTime() === NaN -- which is exactly what
+       * 'infinity'::timestamptz reads back as) has no finite epoch.  Feeding
+       * NaN through the arithmetic below produced a bogus finite value
+       * (2000-01-01) and silently corrupted the data.  Bind SQL NULL instead.
+       */
+      if (isnan(in)) {
+        if (fcinfo) {
+          PG_RETURN_NULL();
+        }
+        if (is_null) {
+          *is_null = true;
+        }
+        return (Datum)0;
+      }
+
       if (rettype == DATEOID) {
         return pljs_convert_epoch_to_date(in);
       } else {
