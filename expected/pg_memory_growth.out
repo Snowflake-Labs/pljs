@@ -1,0 +1,71 @@
+-- Memory-growth and low-memory determinism.
+--
+-- Long-running pljs workers (e.g. the snowflake_cdc mirror procedures) execute
+-- huge numbers of queries, hit errors, and allocate/free JS objects in tight
+-- loops.  These tests assert that the hot paths do not leak unboundedly and
+-- that behaviour at the memory cap is deterministic and recoverable.  Growth is
+-- measured from pg_backend_memory_contexts (thresholds are deliberately loose so
+-- the tests are stable across platforms while still catching real leaks, which
+-- grow proportionally to the iteration count).
+CREATE EXTENSION IF NOT EXISTS pljs;
+NOTICE:  extension "pljs" already exists, skipping
+-- A tight loop of successful queries plus caught runtime and syntax errors must
+-- not leak: each pljs.execute() error is rolled back in its own subtransaction
+-- and the per-call execution context is reclaimed on the error path.
+CREATE FUNCTION exec_err_growth_mb(n int) RETURNS float8 LANGUAGE pljs AS $$
+  var q = "SELECT sum(total_bytes)::float8 AS b FROM pg_backend_memory_contexts";
+  var before = pljs.execute(q)[0].b;
+  for (var i = 0; i < n; i++) {
+    pljs.execute("SELECT " + (i % 7));
+    try { pljs.execute("SELECT 1/0"); } catch (e) {}
+    try { pljs.execute("SELCT bad syntax"); } catch (e) {}
+  }
+  pljs.gc();
+  return (pljs.execute(q)[0].b - before) / (1024 * 1024);
+$$;
+SELECT exec_err_growth_mb(5000) < 10 AS execute_error_loop_bounded;
+ execute_error_loop_bounded 
+----------------------------
+ t
+(1 row)
+
+-- Allocating and dropping large JS objects in a loop must be fully reclaimed by
+-- GC (no steady growth).
+CREATE FUNCTION alloc_growth_mb(n int) RETURNS float8 LANGUAGE pljs AS $$
+  var q = "SELECT sum(total_bytes)::float8 AS b FROM pg_backend_memory_contexts";
+  var before = pljs.execute(q)[0].b;
+  for (var i = 0; i < n; i++) { var a = new ArrayBuffer(512 * 1024); a = null; }
+  pljs.gc();
+  return (pljs.execute(q)[0].b - before) / (1024 * 1024);
+$$;
+SELECT alloc_growth_mb(2000) < 5 AS alloc_gc_loop_bounded;
+ alloc_gc_loop_bounded 
+-----------------------
+ t
+(1 row)
+
+-- At the memory cap, repeated over-cap allocations fail deterministically and
+-- the runtime recovers: a subsequent small allocation still succeeds.  (Relies
+-- on SET pljs.memory_limit taking effect at runtime.)
+DO $$ $$ LANGUAGE pljs;
+SET pljs.memory_limit = 64;
+CREATE FUNCTION oom_recover() RETURNS text LANGUAGE pljs AS $$
+  var out = [];
+  for (var i = 0; i < 3; i++) {
+    try { var a = new ArrayBuffer(200 * 1024 * 1024); out.push("ok:" + a.byteLength); }
+    catch (e) { out.push("oom"); }
+  }
+  var b = new ArrayBuffer(1024);
+  out.push("small:" + b.byteLength);
+  return out.join(",");
+$$;
+SELECT oom_recover();
+      oom_recover       
+------------------------
+ oom,oom,oom,small:1024
+(1 row)
+
+RESET pljs.memory_limit;
+DROP FUNCTION exec_err_growth_mb(int);
+DROP FUNCTION alloc_growth_mb(int);
+DROP FUNCTION oom_recover();
