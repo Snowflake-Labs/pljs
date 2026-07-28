@@ -1,0 +1,18 @@
+-- BigInt language semantics (ported from plv8 bigint.sql).
+--
+-- types.sql already covers 1n binding to int8 and the ** operator. This pins
+-- the one edge that bites callers who mix an int8-derived BigInt with a plain
+-- Number: QuickJS throws a TypeError rather than silently coercing. Relevant
+-- because the CDC adapter keeps LSNs as BigInt and must never accidentally add
+-- a Number to one.
+DO $$
+  try {
+    const r = 1n + 2;
+    pljs.elog(NOTICE, 'mix BigInt+Number: no throw, r=' + r);
+  } catch (e) {
+    pljs.elog(NOTICE, 'mix BigInt+Number throws: ' + e.name);
+  }
+  pljs.elog(NOTICE, 'pure BigInt: 2n**10n=' + (2n ** 10n) + ' cmp=' + (9007199254740993n > 9007199254740992n));
+$$ LANGUAGE pljs;
+NOTICE:  mix BigInt+Number throws: TypeError
+NOTICE:  pure BigInt: 2n**10n=1024 cmp=true

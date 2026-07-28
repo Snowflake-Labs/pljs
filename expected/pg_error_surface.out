@@ -1,0 +1,44 @@
+-- Error surface exposed to pljs code (ported from plv8 error tests).
+--
+-- The mirror procedures inspect caught errors (e.g. reading an application code
+-- out of the message, see executeMirrorTask) and rely on SPI errors being
+-- catchable with a stable shape. This pins: the SQLSTATE on a caught
+-- pljs.execute error, a JS ReferenceError being catchable, elog receiving an
+-- object whose toString throws, and a nested pljs.subtransaction rollback.
+DO $$
+  try { pljs.execute('SELECT 1/0'); }
+  catch (e) { pljs.elog(NOTICE, 'div0: sqlerrcode=' + e.sqlerrcode); }
+
+  try { pljs.execute('SELECT nonexistent_col_xyz'); }
+  catch (e) { pljs.elog(NOTICE, 'undef col: sqlerrcode=' + e.sqlerrcode); }
+
+  try { pljs.execute('SELCT 1'); }
+  catch (e) { pljs.elog(NOTICE, 'sql syntax: sqlerrcode=' + e.sqlerrcode); }
+
+  try { nosuch_fn_xyz(); }
+  catch (e) { pljs.elog(NOTICE, 'js reference: name=' + e.name); }
+
+  try {
+    pljs.elog(NOTICE, { toString: function () { throw new Error('boom'); } });
+    pljs.elog(NOTICE, 'elog-throwing-toString: no throw');
+  } catch (e) {
+    pljs.elog(NOTICE, 'elog-throwing-toString threw: ' + (e instanceof Error));
+  }
+
+  let inner = 'no';
+  pljs.subtransaction(function () {
+    try {
+      pljs.subtransaction(function () { throw new Error('inner rollback'); });
+    } catch (e2) {
+      inner = 'caught';
+    }
+  });
+  pljs.elog(NOTICE, 'nested subxact inner=' + inner);
+$$ LANGUAGE pljs;
+NOTICE:  div0: sqlerrcode=22012
+NOTICE:  undef col: sqlerrcode=42703
+NOTICE:  sql syntax: sqlerrcode=42601
+NOTICE:  js reference: name=ReferenceError
+NOTICE:  (null)
+NOTICE:  elog-throwing-toString: no throw
+NOTICE:  nested subxact inner=caught

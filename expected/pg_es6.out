@@ -1,0 +1,44 @@
+-- QuickJS (ES2023) language-surface pin (extends es6.sql).
+--
+-- The mirror procedures are written in modern JS (destructuring, spread,
+-- classes, Map/Set, generators, optional chaining, nullish coalescing). This
+-- pins that surface so a QuickJS bump cannot silently drop a feature. It also
+-- pins a critical limitation: pljs has no event-loop / microtask pump, so a
+-- Promise .then callback does NOT run during procedure execution.
+DO $$
+  const [a, b = 9, ...rest] = [1, undefined, 3, 4];
+  const { x, y = 5 } = { x: 10 };
+  const merged = { ...{ p: 1 }, ...{ q: 2 } };
+  pljs.elog(NOTICE, 'destructure a=' + a + ' b=' + b + ' rest=' + rest.join(',') +
+                    ' x=' + x + ' y=' + y + ' merged=' + JSON.stringify(merged));
+
+  const sq = n => n * n;
+  pljs.elog(NOTICE, `arrow+template sq(4)=${sq(4)}`);
+
+  class C { constructor(v) { this.v = v; } get double() { return this.v * 2; } }
+  pljs.elog(NOTICE, 'class double(7)=' + new C(7).double);
+
+  const m = new Map([['k', 1]]);
+  const s = new Set([1, 1, 2, 3]);
+  pljs.elog(NOTICE, 'map/set ' + m.get('k') + '/' + s.size);
+
+  function* gen() { yield 1; yield 2; yield 3; }
+  let sum = 0;
+  for (const v of gen()) sum += v;
+  pljs.elog(NOTICE, 'generator sum=' + sum);
+
+  const o = { a: { b: null } };
+  pljs.elog(NOTICE, 'opt ' + (o?.a?.b ?? 'dflt') + '/' + (o?.z?.y ?? 'dflt2'));
+
+  // No event loop: a resolved Promise's .then does not fire synchronously here.
+  let settled = 'no';
+  Promise.resolve(1).then(() => { settled = 'yes'; });
+  pljs.elog(NOTICE, 'promise settled during procedure=' + settled);
+$$ LANGUAGE pljs;
+NOTICE:  destructure a=1 b=9 rest=3,4 x=10 y=5 merged={"p":1,"q":2}
+NOTICE:  arrow+template sq(4)=16
+NOTICE:  class double(7)=14
+NOTICE:  map/set 1/3
+NOTICE:  generator sum=6
+NOTICE:  opt dflt/dflt2
+NOTICE:  promise settled during procedure=no

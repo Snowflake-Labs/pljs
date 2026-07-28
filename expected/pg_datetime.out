@@ -1,0 +1,41 @@
+-- Date / timestamp marshalling between PostgreSQL and JS Date.
+--
+-- pljs marshals date / timestamp / timestamptz to a JS Date (epoch millis) and
+-- back. The snowflake_cdc procedures read timestamptz control columns
+-- (last_operation_time, last_apply_time) back as Dates, so this pins the
+-- round-trip. Output is made deterministic with fixed timezone/datestyle/float
+-- settings. Also pins the infinity divergence: 'infinity'::timestamptz surfaces
+-- as a JS Invalid Date.
+SET timezone = 'UTC';
+SET datestyle = 'ISO, MDY';
+SET extra_float_digits = 3;
+DO $$
+  const t = pljs.execute("SELECT '2024-03-15 12:34:56.789+00'::timestamptz AS t")[0].t;
+  pljs.elog(NOTICE, 'timestamptz->Date: isDate=' + (t instanceof Date) + ' iso=' + t.toISOString());
+
+  const d = pljs.execute("SELECT '2024-03-15'::date AS d")[0].d;
+  pljs.elog(NOTICE, 'date->Date: isDate=' + (d instanceof Date) + ' iso=' + d.toISOString());
+
+  const back = pljs.execute('SELECT $1::timestamptz AS t', [t])[0].t;
+  pljs.elog(NOTICE, 'Date->timestamptz->Date: eq=' + (back.getTime() === t.getTime()));
+
+  const inf = pljs.execute("SELECT 'infinity'::timestamptz AS t")[0].t;
+  const ninf = pljs.execute("SELECT '-infinity'::timestamptz AS t")[0].t;
+  pljs.elog(NOTICE, 'infinity: isDate=' + (inf instanceof Date) +
+                    ' valid=' + (inf instanceof Date && !isNaN(inf.getTime())));
+  pljs.elog(NOTICE, '-infinity: isDate=' + (ninf instanceof Date) +
+                    ' valid=' + (ninf instanceof Date && !isNaN(ninf.getTime())));
+
+  // CDC read-back: a last_operation_time-style timestamptz column is a Date.
+  const now = pljs.execute('SELECT now() AS t')[0].t;
+  pljs.elog(NOTICE, 'now() read-back isDate=' + (now instanceof Date));
+$$ LANGUAGE pljs;
+NOTICE:  timestamptz->Date: isDate=true iso=2024-03-15T12:34:56.789Z
+NOTICE:  date->Date: isDate=true iso=2024-03-15T00:00:00.000Z
+NOTICE:  Date->timestamptz->Date: eq=true
+NOTICE:  infinity: isDate=true valid=false
+NOTICE:  -infinity: isDate=true valid=false
+NOTICE:  now() read-back isDate=true
+RESET timezone;
+RESET datestyle;
+RESET extra_float_digits;
