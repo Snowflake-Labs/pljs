@@ -1,0 +1,132 @@
+-- Null / undefined / falsy edge matrix.
+--
+-- Nulls and falsy values are where a language binding most often goes wrong, so
+-- this pins the tri-state (SQL NULL vs JS null vs JS undefined) in both
+-- directions, proves that falsy-but-not-null values (0, 0n, "", false, NaN, -0)
+-- survive instead of collapsing to NULL, and covers nulls inside arrays,
+-- composites and jsonb.  It also pins the fix where an `undefined` array element
+-- used to mark the whole array result as SQL NULL.
+CREATE EXTENSION IF NOT EXISTS pljs;
+NOTICE:  extension "pljs" already exists, skipping
+-- reading SQL NULL yields JS null (an object), never undefined.
+CREATE FUNCTION read_sqlnull() RETURNS text LANGUAGE pljs AS $$
+  var r = pljs.execute("SELECT NULL::int AS v")[0].v;
+  return "typeof=" + (typeof r) + " ===null:" + (r === null) +
+         " ===undefined:" + (r === undefined);
+$$;
+SELECT read_sqlnull();
+                 read_sqlnull                  
+-----------------------------------------------
+ typeof=object ===null:true ===undefined:false
+(1 row)
+
+-- JS null, undefined and a bare "no return" all become SQL NULL.
+CREATE FUNCTION ret_null() RETURNS int LANGUAGE pljs AS $$ return null; $$;
+CREATE FUNCTION ret_undef() RETURNS int LANGUAGE pljs AS $$ return undefined; $$;
+CREATE FUNCTION ret_noret() RETURNS int LANGUAGE pljs AS $$ var x = 1; $$;
+SELECT ret_null() IS NULL AS js_null_is_sqlnull,
+       ret_undef() IS NULL AS js_undef_is_sqlnull,
+       ret_noret() IS NULL AS no_return_is_sqlnull;
+ js_null_is_sqlnull | js_undef_is_sqlnull | no_return_is_sqlnull 
+--------------------+---------------------+----------------------
+ t                  | t                   | t
+(1 row)
+
+-- Falsy-but-not-null values must round-trip as themselves, NOT as SQL NULL.
+CREATE FUNCTION ret_zero() RETURNS int LANGUAGE pljs AS $$ return 0; $$;
+CREATE FUNCTION ret_bigint0() RETURNS int8 LANGUAGE pljs AS $$ return 0n; $$;
+CREATE FUNCTION ret_emptystr() RETURNS text LANGUAGE pljs AS $$ return ""; $$;
+CREATE FUNCTION ret_false() RETURNS bool LANGUAGE pljs AS $$ return false; $$;
+CREATE FUNCTION ret_nan() RETURNS float8 LANGUAGE pljs AS $$ return NaN; $$;
+CREATE FUNCTION ret_negzero() RETURNS float8 LANGUAGE pljs AS $$ return -0; $$;
+SELECT ret_zero() AS zero, ret_zero() IS NULL AS zero_null,
+       ret_bigint0() AS bigint0, ret_bigint0() IS NULL AS bigint0_null;
+ zero | zero_null | bigint0 | bigint0_null 
+------+-----------+---------+--------------
+    0 | f         |       0 | f
+(1 row)
+
+SELECT ret_emptystr() = '' AS emptystr_ok, ret_emptystr() IS NULL AS emptystr_null,
+       ret_false() AS false_val, ret_false() IS NULL AS false_null;
+ emptystr_ok | emptystr_null | false_val | false_null 
+-------------+---------------+-----------+------------
+ t           | f             | f         | f
+(1 row)
+
+SELECT ret_nan() AS nan, ret_nan() IS NULL AS nan_null,
+       ret_negzero() AS negzero, ret_negzero() IS NULL AS negzero_null;
+ nan | nan_null | negzero | negzero_null 
+-----+----------+---------+--------------
+ NaN | f        |      -0 | f
+(1 row)
+
+-- Binding a JS null parameter produces SQL NULL.
+CREATE FUNCTION bind_null() RETURNS boolean LANGUAGE pljs AS $$
+  return pljs.execute("SELECT ($1::int IS NULL) AS n", [null])[0].n;
+$$;
+SELECT bind_null() AS bind_null_is_sqlnull;
+ bind_null_is_sqlnull 
+----------------------
+ t
+(1 row)
+
+-- Arrays: null and undefined elements become NULL elements; falsy elements are
+-- preserved (and the whole array is not nulled out).
+CREATE FUNCTION arr_null_undef() RETURNS int[] LANGUAGE pljs AS $$ return [1, null, undefined, 4]; $$;
+SELECT arr_null_undef() AS null_undef_elems;
+ null_undef_elems 
+------------------
+ {1,NULL,NULL,4}
+(1 row)
+
+CREATE FUNCTION arr_falsy() RETURNS text[] LANGUAGE pljs AS $$ return ["", "0", null]; $$;
+SELECT arr_falsy() AS falsy_text_elems;
+ falsy_text_elems 
+------------------
+ {"",0,NULL}
+(1 row)
+
+-- Composite: a null field stays NULL, siblings keep their (falsy) values.
+CREATE FUNCTION comp(OUT a int, OUT b text, OUT c bool) LANGUAGE pljs AS $$
+  return { a: null, b: "", c: false };
+$$;
+SELECT * FROM comp();
+ a | b | c 
+---+---+---
+   |   | f
+(1 row)
+
+-- jsonb four-way null: reading SQL NULL and JSON 'null' both yield JS null;
+-- an inner JSON null is preserved; a top-level JS null binds to SQL NULL.
+CREATE FUNCTION jb_read_nulls() RETURNS text LANGUAGE pljs AS $$
+  var sqlnull = pljs.execute("SELECT NULL::jsonb AS v")[0].v;
+  var jsonnull = pljs.execute("SELECT 'null'::jsonb AS v")[0].v;
+  return "sqlNULL===null:" + (sqlnull === null) +
+         " jsonNull===null:" + (jsonnull === null);
+$$;
+SELECT jb_read_nulls();
+              jb_read_nulls               
+------------------------------------------
+ sqlNULL===null:true jsonNull===null:true
+(1 row)
+
+CREATE FUNCTION jb_inner_null() RETURNS jsonb LANGUAGE pljs AS $$ return { a: null, b: 1 }; $$;
+SELECT jb_inner_null() AS inner_null_preserved;
+ inner_null_preserved 
+----------------------
+ {"a": null, "b": 1}
+(1 row)
+
+CREATE FUNCTION jb_top_null() RETURNS boolean LANGUAGE pljs AS $$
+  return pljs.execute("SELECT ($1::jsonb IS NULL) AS n", [null])[0].n;
+$$;
+SELECT jb_top_null() AS top_js_null_is_sqlnull;
+ top_js_null_is_sqlnull 
+------------------------
+ t
+(1 row)
+
+DROP FUNCTION read_sqlnull, ret_null, ret_undef, ret_noret;
+DROP FUNCTION ret_zero, ret_bigint0, ret_emptystr, ret_false, ret_nan, ret_negzero;
+DROP FUNCTION bind_null, arr_null_undef, arr_falsy, comp;
+DROP FUNCTION jb_read_nulls, jb_inner_null, jb_top_null;

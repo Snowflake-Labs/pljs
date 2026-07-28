@@ -632,11 +632,22 @@ Datum pljs_jsvalue_to_array(pljs_type *type, JSValue val, JSContext *ctx,
   for (int i = 0; i < array_length; i++) {
     JSValue elem = JS_GetPropertyUint32(ctx, val, i);
 
-    if (JS_IsNull(elem)) {
+    /*
+     * Treat both null and undefined elements as SQL NULL.  Crucially we must
+     * NOT let an element conversion see the *function's* fcinfo: a null /
+     * undefined (or otherwise NULL-producing) element would run
+     * PG_RETURN_NULL(), which sets fcinfo->isnull and marks the whole array
+     * result as SQL NULL -- e.g. [1, undefined, 4] used to collapse to a NULL
+     * array instead of {1,NULL,4}.  Passing NULL fcinfo routes NULLs through
+     * the per-element is_null out-parameter instead.
+     */
+    if (JS_IsNull(elem) || JS_IsUndefined(elem)) {
       nulls[i] = true;
+      JS_FreeValue(ctx, elem);
     } else {
       values[i] =
-          pljs_jsvalue_to_datum(type->typid, elem, &nulls[i], ctx, fcinfo);
+          pljs_jsvalue_to_datum(type->typid, elem, &nulls[i], ctx, NULL);
+      JS_FreeValue(ctx, elem);
     }
   }
 
