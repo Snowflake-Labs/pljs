@@ -4,7 +4,7 @@
 -- (postgres/adapter.js newMirrorIdSqlExpr) and always surface uuids as text,
 -- conversion in the shape the procedures need. This pins the text form the
 -- procedures depend on: the gen_random_uuid()::text shape, a text-uuid
--- comparison against a uuid column, and the exact bare-uuid result behaviour
+-- comparison against a uuid column, and the bare-uuid result behaviour
 -- (recorded in PROVENANCE.md) so a caller can rely on ::text.
 DO $$
   const id = pljs.execute('SELECT gen_random_uuid()::text AS id')[0].id;
@@ -15,7 +15,10 @@ DO $$
   const eq = pljs.execute('SELECT ($1::uuid = $2::uuid) AS e', [fixed, fixed])[0].e;
   pljs.elog(NOTICE, 'text-uuid compare eq=' + eq);
 
-  // Pin the exact bare-uuid result behaviour vs the ::text form callers use.
+  // Pin the bare-uuid result behaviour alongside the ::text form callers use.
+  // Both now agree: the datum->JS conversion fallback routes an otherwise
+  // unhandled type through its output function, so a bare uuid round-trips
+  // instead of yielding its raw 16 bytes decoded as UTF-8.
   const bare = pljs.execute("SELECT '11111111-2222-3333-4444-555555555555'::uuid AS u")[0].u;
   const astext = pljs.execute("SELECT '11111111-2222-3333-4444-555555555555'::uuid::text AS u")[0].u;
   pljs.elog(NOTICE, 'bare uuid: typeof=' + (typeof bare) + ' eq_fixed=' + (bare === fixed) +
@@ -23,4 +26,4 @@ DO $$
 $$ LANGUAGE pljs;
 NOTICE:  gen uuid::text: type=string len=36 dashes=4
 NOTICE:  text-uuid compare eq=true
-NOTICE:  bare uuid: typeof=string eq_fixed=false ::text eq_fixed=true
+NOTICE:  bare uuid: typeof=string eq_fixed=true ::text eq_fixed=true
