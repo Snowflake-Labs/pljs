@@ -20,6 +20,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 /*
  * Error handling helper macros for consistent error patterns.
@@ -69,9 +70,18 @@ inline static bool Is_Object(JSValueConst obj) {
   return NULL != JS_GetOpaque(obj, JS_CLASS_OBJECT);
 }
 
-// if given object is shared array buffer.
+// if given object is a Date.
+//
+// NB: this cannot use JS_GetOpaque().  A Date keeps its epoch in the object's
+// `u.object_data` JSValue, which shares a union with `u.opaque`, so
+// JS_GetOpaque() returns the *bit pattern of the stored double*.  For
+// `new Date(0)` that pattern is all zeroes, so the old opaque-based test
+// reported "not a Date" for exactly the Unix epoch: binding it to a
+// date/timestamp column fell through to the string path (a silent NULL before
+// the input-function fix, an "unrecognized time zone" error after it), and in a
+// jsonb result it came out as `{}`.  JS_GetClassID() is a real brand check.
 inline static bool Is_Date(JSValueConst obj) {
-  return NULL != JS_GetOpaque(obj, JS_CLASS_DATE);
+  return JS_GetClassID(obj) == JS_CLASS_DATE;
 }
 
 #if JSONB_DIRECT_CONVERSION
@@ -1118,8 +1128,34 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     size_t plen;
     const char *str = JS_ToCStringLen(ctx, &plen, js);
 
-    // return it as a CStringTextDatum.
-    Datum ret = CStringGetTextDatum(str);
+    /*
+     * JS_JSONStringify() fails (returning an exception) for a value JSON
+     * cannot represent -- a circular structure, a BigInt anywhere in the tree,
+     * or a throwing toJSON()/getter.  JS_ToCStringLen() then yields NULL and
+     * the old code handed that straight to CStringGetTextDatum(), whose
+     * strlen(NULL) segfaulted the backend.  Report the JavaScript error
+     * instead.
+     */
+    if (str == NULL) {
+      JSValue exc = JS_GetException(ctx);
+      const char *msg = JS_IsNull(exc) || JS_IsUndefined(exc)
+                            ? NULL
+                            : JS_ToCString(ctx, exc);
+      char *detail = msg ? pstrdup(msg) : NULL;
+
+      if (msg) {
+        JS_FreeCString(ctx, msg);
+      }
+      JS_FreeValue(ctx, exc);
+      JS_FreeValue(ctx, js);
+
+      ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                      errmsg("could not convert JavaScript value to json"),
+                      detail ? errdetail("%s", detail) : 0));
+    }
+
+    // return it as a text datum of the exact stringified length.
+    Datum ret = PointerGetDatum(cstring_to_text_with_len(str, plen));
 
     JS_FreeCString(ctx, str);
     JS_FreeValue(ctx, js);
@@ -1630,31 +1666,121 @@ static JsonbValue *jsonb_push(JsonbBuildState *pstate, JsonbIteratorToken seq,
 #endif
 
 // Forward declarations of the conversion functions.
+struct pljs_jsonb_state;
 static JsonbValue *jsonb_object_from_object(JSValue object,
                                             JsonbBuildState *pstate,
-                                            JSContext *ctx);
-static JsonbValue *
-jsonb_array_from_array(JSValue array, JsonbBuildState *pstate, JSContext *ctx);
+                                            JSContext *ctx,
+                                            struct pljs_jsonb_state *state);
+static JsonbValue *jsonb_array_from_array(JSValue array,
+                                          JsonbBuildState *pstate,
+                                          JSContext *ctx,
+                                          struct pljs_jsonb_state *state);
+
+/*
+ * Recursion guard for the JS -> jsonb conversion.
+ *
+ * jsonb_object_from_object() and jsonb_array_from_array() recurse into every
+ * nested container with no bound and no record of what they have already
+ * visited, so a cyclic graph recursed forever and overflowed the C stack --
+ * SIGSEGV, taking the backend down.  That is reachable from ordinary JS: a
+ * self-referencing object (`o.self = o`), a self-referencing array, or a bare
+ * `function` value (whose `prototype.constructor` points back at the function).
+ * Deep-but-acyclic nesting overflowed the stack the same way.
+ *
+ * `ancestors` holds the containers currently on the recursion stack; a value
+ * that reappears there is part of a cycle.  Depth is capped independently so
+ * the array itself stays small and acyclic input cannot exhaust the stack.
+ * Note the QuickJS stack limit does not help here: this recursion happens in
+ * pljs's own C frames, not in the interpreter.
+ */
+#define PLJS_JSONB_MAX_DEPTH 200
+
+struct pljs_jsonb_state {
+  void *ancestors[PLJS_JSONB_MAX_DEPTH];
+  int depth;
+};
+
+/*
+ * Push `value` onto the ancestor stack, raising if it is already there (cycle)
+ * or if the nesting limit is reached.
+ */
+static void pljs_jsonb_enter(JSValueConst value,
+                             struct pljs_jsonb_state *state) {
+  void *ptr = JS_VALUE_GET_PTR(value);
+
+  for (int i = 0; i < state->depth; i++) {
+    if (state->ancestors[i] == ptr) {
+      ereport(ERROR, (errcode(ERRCODE_INVALID_RECURSION),
+                      errmsg("cannot convert a circular structure to jsonb")));
+    }
+  }
+
+  if (state->depth >= PLJS_JSONB_MAX_DEPTH) {
+    ereport(ERROR,
+            (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+             errmsg("JavaScript value nested too deeply to convert to jsonb"),
+             errdetail("The maximum nesting depth is %d.",
+                       PLJS_JSONB_MAX_DEPTH)));
+  }
+
+  state->ancestors[state->depth++] = ptr;
+}
+
+static void pljs_jsonb_leave(struct pljs_jsonb_state *state) {
+  Assert(state->depth > 0);
+  state->depth--;
+}
 
 /**
  * @brief Converts a Postgres time in milliseconds to a 8601 datetime string.
  *
  * @param millis @c double - Postgres time in milliseconds
- * @returns @c char * representation of the date and time
+ * @returns @c char * representation of the date and time, or NULL if the value
+ * is outside the range gmtime() can represent
  */
 static char *time_as_8601(double millis) {
-  char tmp[100];
-  char *buf = (char *)palloc(25);
+  char tmp[64];
+  struct tm *tm_info;
+  double integral, fractional;
+  time_t t;
+  int ms;
 
-  time_t t = (time_t)(millis / 1000);
-  strftime(tmp, 25, "%Y-%m-%dT%H:%M:%S", gmtime(&t));
+  /*
+   * Split into whole seconds and milliseconds.  modf() truncates toward zero,
+   * so a pre-1970 (negative) epoch yields a negative fraction: the old code
+   * fed that straight into "%03d", producing e.g. ".-500Z" -- four characters
+   * where three were budgeted, overrunning the fixed palloc(25) buffer.  Floor
+   * the division instead so the millisecond part is always in [0, 999].
+   */
+  fractional = modf(millis / 1000.0, &integral);
+  if (fractional < 0) {
+    fractional += 1.0;
+    integral -= 1.0;
+  }
 
-  double integral;
-  double fractional = modf(millis / 1000, &integral);
+  ms = (int)(fractional * 1000.0 + 0.5);
+  if (ms > 999) {
+    ms = 999;
+  }
 
-  sprintf(buf, "%s.%03dZ", tmp, (int)(fractional * 1000));
+  t = (time_t)integral;
+  tm_info = gmtime(&t);
 
-  return buf;
+  if (tm_info == NULL) {
+    return NULL;
+  }
+
+  /*
+   * "%Y" is not limited to four digits (JS Dates reach year 275760), and the
+   * caller must not assume a fixed 24-character result either -- the old code
+   * hardcoded a length of 24, which truncated a five-digit year.  Size the
+   * buffer generously and let the caller use strlen().
+   */
+  if (strftime(tmp, sizeof(tmp), "%Y-%m-%dT%H:%M:%S", tm_info) == 0) {
+    return NULL;
+  }
+
+  return psprintf("%s.%03dZ", tmp, ms);
 }
 
 /**
@@ -1705,9 +1831,22 @@ static JsonbValue *jsonb_from_value(JSValue value, JsonbBuildState *pstate,
 
       JS_ToFloat64(ctx, &in, value);
 
-      val.val.numeric = DatumGetNumeric(
-          DirectFunctionCall1(float8_numeric, Float8GetDatum((float8)in)));
-      val.type = jbvNumeric;
+      /*
+       * jsonb has no representation for NaN or +/-Infinity, and neither does
+       * JSON.  float8_numeric() happily produces a numeric 'NaN'/'Infinity',
+       * which pushJsonbValue stores verbatim: the resulting datum rendered as
+       * `{"v": NaN}` -- text that is not valid JSON, cannot be re-parsed by
+       * jsonb_in, and breaks pg_dump/restore and every client JSON parser.
+       * Emit JSON null, which is what JSON.stringify() (and therefore pljs's
+       * own `json` conversion path) does for these values.
+       */
+      if (!isfinite(in)) {
+        val.type = jbvNull;
+      } else {
+        val.val.numeric = DatumGetNumeric(
+            DirectFunctionCall1(float8_numeric, Float8GetDatum((float8)in)));
+        val.type = jbvNumeric;
+      }
     } else if (Is_Date(value)) {
       double in;
 
@@ -1716,9 +1855,15 @@ static JsonbValue *jsonb_from_value(JSValue value, JsonbBuildState *pstate,
       if (isnan(in)) {
         val.type = jbvNull;
       } else {
-        val.val.string.val = time_as_8601(in);
-        val.val.string.len = 24;
-        val.type = jbvString;
+        char *iso = time_as_8601(in);
+
+        if (iso == NULL) {
+          val.type = jbvNull;
+        } else {
+          val.val.string.val = iso;
+          val.val.string.len = strlen(iso);
+          val.type = jbvString;
+        }
       }
     } else {
       val.type = jbvString;
@@ -1747,7 +1892,10 @@ static JsonbValue *jsonb_from_value(JSValue value, JsonbBuildState *pstate,
  */
 static JsonbValue *jsonb_array_from_array(JSValue array,
                                           JsonbBuildState *pstate,
-                                          JSContext *ctx) {
+                                          JSContext *ctx,
+                                          struct pljs_jsonb_state *state) {
+  pljs_jsonb_enter(array, state);
+
   // Push the beginning of the array into the parse state.
   JsonbValue *value = jsonb_push(pstate, WJB_BEGIN_ARRAY, NULL);
 
@@ -1759,11 +1907,24 @@ static JsonbValue *jsonb_array_from_array(JSValue array,
     // Get the current element.
     JSValue elem = JS_GetPropertyUint32(ctx, array, i);
 
-    // For each type, set `value` to the result.
-    if (JS_IsArray(ctx, elem)) {
-      value = jsonb_array_from_array(elem, pstate, ctx);
+    /*
+     * Date and function are objects, so they must be classified before the
+     * generic JS_IsObject() test below, which would otherwise enumerate their
+     * properties: a Date has none, so every Date in a jsonb result silently
+     * became `{}`, and a function recursed into its own prototype chain.
+     * JSON.stringify() renders a Date as an ISO string and a function in an
+     * array as null; match that.
+     */
+    if (Is_Date(elem)) {
+      value = jsonb_from_value(elem, pstate, WJB_ELEM, ctx, NULL);
+    } else if (JS_IsFunction(ctx, elem)) {
+      JsonbValue null_val = {.type = jbvNull};
+
+      value = jsonb_push(pstate, WJB_ELEM, &null_val);
+    } else if (JS_IsArray(ctx, elem)) {
+      value = jsonb_array_from_array(elem, pstate, ctx, state);
     } else if (JS_IsObject(elem)) {
-      value = jsonb_object_from_object(elem, pstate, ctx);
+      value = jsonb_object_from_object(elem, pstate, ctx, state);
     } else {
       value = jsonb_from_value(elem, pstate, WJB_ELEM, ctx, NULL);
     }
@@ -1774,6 +1935,8 @@ static JsonbValue *jsonb_array_from_array(JSValue array,
 
   // Set the value to the end of the array.
   value = jsonb_push(pstate, WJB_END_ARRAY, NULL);
+
+  pljs_jsonb_leave(state);
 
   return value;
 }
@@ -1788,7 +1951,10 @@ static JsonbValue *jsonb_array_from_array(JSValue array,
  */
 static JsonbValue *jsonb_object_from_object(JSValue object,
                                             JsonbBuildState *pstate,
-                                            JSContext *ctx) {
+                                            JSContext *ctx,
+                                            struct pljs_jsonb_state *state) {
+  pljs_jsonb_enter(object, state);
+
   // Push the beginning of the object intp the parse state.
   JsonbValue *value = jsonb_push(pstate, WJB_BEGIN_OBJECT, NULL);
   uint32_t object_keys_length = 0;
@@ -1797,7 +1963,8 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
   // Get the keys of the `Object`.
   if (JS_GetOwnPropertyNames(ctx, &tab, &object_keys_length, object,
                              JS_GPN_STRING_MASK) < 0) {
-    return false;
+    ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+                    errmsg("could not enumerate JavaScript object properties")));
   }
 
   // Iterate through the `Object` keys.
@@ -1806,16 +1973,34 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
     JSValue o =
         JS_GetPropertyInternal(ctx, object, tab[object_key].atom, object, 0);
 
+    /*
+     * JSON.stringify() omits function-valued properties entirely; do the same.
+     * Beyond matching JSON semantics this avoids descending into a function's
+     * `prototype`, whose `constructor` points back at the function -- an
+     * unbounded recursion that used to crash the backend.
+     */
+    if (JS_IsFunction(ctx, o)) {
+      JS_FreeValue(ctx, o);
+      continue;
+    }
+
     const char *key = JS_AtomToCString(ctx, tab[object_key].atom);
 
     value = jsonb_from_value(o, pstate, WJB_KEY, ctx, key);
 
-    // If the value is an `Array` the convert it.
-    if (JS_IsArray(ctx, o)) {
-      value = jsonb_array_from_array(o, pstate, ctx);
+    /*
+     * Date before the generic object test: a Date has no own properties, so
+     * the JS_IsObject() branch turned every Date in a jsonb result into `{}`
+     * and the ISO-string conversion below was dead code.
+     */
+    if (Is_Date(o)) {
+      value = jsonb_from_value(o, pstate, WJB_VALUE, ctx, NULL);
+    } else if (JS_IsArray(ctx, o)) {
+      // If the value is an `Array` the convert it.
+      value = jsonb_array_from_array(o, pstate, ctx, state);
     } else if (JS_IsObject(o)) {
       // Or convert an `Object`.
-      value = jsonb_object_from_object(o, pstate, ctx);
+      value = jsonb_object_from_object(o, pstate, ctx, state);
     } else {
       // Or anything else.
       value = jsonb_from_value(o, pstate, WJB_VALUE, ctx, NULL);
@@ -1841,6 +2026,8 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
   // Push that we are at the end of an object.
   value = jsonb_push(pstate, WJB_END_OBJECT, NULL);
 
+  pljs_jsonb_leave(state);
+
   return value;
 }
 
@@ -1861,19 +2048,52 @@ static Jsonb *convert_object(JSValue object, JSContext *ctx) {
   MemoryContextSwitchTo(conversion_context);
 
   JsonbBuildState parse_state = {0};
-  JsonbValue *value;
+  JsonbValue *volatile value = NULL;
+  struct pljs_jsonb_state state = {.depth = 0};
 
-  // Check the type and get its value.
-  if (JS_IsArray(ctx, object)) {
-    value = jsonb_array_from_array(object, &parse_state, ctx);
+  /*
+   * The conversion can now raise (circular structure, nesting limit, a numeric
+   * that will not convert).  Restore the caller's memory context and drop the
+   * conversion context on the way out so a rejected value does not leak a
+   * context and leave CurrentMemoryContext pointing into freed memory.
+   */
+  PG_TRY();
+  {
+    // Check the type and get its value.
+    if (JS_IsArray(ctx, object)) {
+      value = jsonb_array_from_array(object, &parse_state, ctx, &state);
+    } else if (Is_Date(object) || JS_IsFunction(ctx, object)) {
+    /*
+     * A top-level Date renders as its ISO string and a top-level function as
+     * JSON null (JSON.stringify semantics); both must bypass the object branch,
+     * which would produce `{}` for a Date and recurse into a function forever.
+     */
+    jsonb_push(&parse_state, WJB_BEGIN_ARRAY, NULL);
+    if (JS_IsFunction(ctx, object)) {
+      JsonbValue null_val = {.type = jbvNull};
+
+      jsonb_push(&parse_state, WJB_ELEM, &null_val);
+    } else {
+      jsonb_from_value(object, &parse_state, WJB_ELEM, ctx, NULL);
+    }
+    value = jsonb_push(&parse_state, WJB_END_ARRAY, NULL);
+    value->val.array.rawScalar = true;
   } else if (JS_IsObject(object)) {
-    value = jsonb_object_from_object(object, &parse_state, ctx);
+    value = jsonb_object_from_object(object, &parse_state, ctx, &state);
   } else {
     jsonb_push(&parse_state, WJB_BEGIN_ARRAY, NULL);
     jsonb_from_value(object, &parse_state, WJB_ELEM, ctx, NULL);
     value = jsonb_push(&parse_state, WJB_END_ARRAY, NULL);
     value->val.array.rawScalar = true;
   }
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(oldcontext);
+    MemoryContextDelete(conversion_context);
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
 
   // Switch back to our old #MemoryContext.
   MemoryContextSwitchTo(oldcontext);

@@ -1,0 +1,166 @@
+-- Three bugs around Date conversion, which have to be fixed together.
+--
+-- 1) Is_Date() tested JS_GetOpaque(obj, JS_CLASS_DATE).  A Date keeps its epoch
+--    in the object's `u.object_data` JSValue, which shares a union with
+--    `u.opaque`, so that read returns the *bit pattern of the stored double*.
+--    For `new Date(0)` the pattern is all zeroes, so exactly the Unix epoch was
+--    reported as "not a Date": binding it to a date/timestamp column fell
+--    through to the string path and raised an unrecognized-time-zone error
+--    (before the input-function fix it silently became NULL).
+--
+-- 2) In the JS -> jsonb path a Date was classified by the generic JS_IsObject()
+--    test before ever reaching the Date branch.  A Date has no own properties,
+--    so every Date in a jsonb result came out as `{}` -- silent data loss, and
+--    the ISO-string code was dead.
+--
+-- 3) With (2) fixed, that ISO-string code becomes reachable -- and it wrote up
+--    to 26 bytes into a palloc(25) buffer.  modf() truncates toward zero, so a
+--    pre-1970 epoch produced a negative millisecond part and "%03d" rendered
+--    ".-500Z" (four characters where three were budgeted); "%Y" is likewise not
+--    limited to four digits.  It also hardcoded the result length as 24, which
+--    truncated a five-digit year.
+SET timezone = 'UTC';
+CREATE EXTENSION IF NOT EXISTS pljs;
+NOTICE:  extension "pljs" already exists, skipping
+-- 1) new Date(0) on the date/timestamp bind paths.
+CREATE FUNCTION date_of_epoch(ms float8) RETURNS timestamptz AS $$
+  return new Date(ms);
+$$ LANGUAGE pljs;
+SELECT ms, date_of_epoch(ms)
+FROM (VALUES (0::float8), (1), (-1), (1000), (-500), (1767322000000)) v(ms);
+      ms       |          date_of_epoch           
+---------------+----------------------------------
+             0 | Thu Jan 01 00:00:00 1970 UTC
+             1 | Thu Jan 01 00:00:00.001 1970 UTC
+            -1 | Wed Dec 31 23:59:59.999 1969 UTC
+          1000 | Thu Jan 01 00:00:01 1970 UTC
+          -500 | Wed Dec 31 23:59:59.5 1969 UTC
+ 1767322000000 | Fri Jan 02 02:46:40 2026 UTC
+(6 rows)
+
+CREATE FUNCTION dateadt_of_epoch(ms float8) RETURNS date AS $$
+  return new Date(ms);
+$$ LANGUAGE pljs;
+SELECT dateadt_of_epoch(0) AS epoch_0, dateadt_of_epoch(86400000) AS epoch_1day;
+  epoch_0   | epoch_1day 
+------------+------------
+ 01-01-1970 | 01-02-1970
+(1 row)
+
+-- 2) Dates in jsonb: top level, nested, in an array, and inside a Date-only
+-- object.  All of these used to be `{}`.
+CREATE FUNCTION jsonb_dates() RETURNS jsonb AS $$
+  return {
+    top: new Date(Date.UTC(2026, 0, 2, 3, 4, 5, 678)),
+    epoch: new Date(0),
+    arr: [new Date(0), new Date(86400000)],
+    nested: {when: new Date(Date.UTC(1999, 11, 31, 23, 59, 59, 999))},
+    invalid: new Date(NaN)
+  };
+$$ LANGUAGE pljs;
+SELECT jsonb_pretty(jsonb_dates());
+                jsonb_pretty                
+--------------------------------------------
+ {                                         +
+     "arr": [                              +
+         "1970-01-01T00:00:00.000Z",       +
+         "1970-01-02T00:00:00.000Z"        +
+     ],                                    +
+     "top": "2026-01-02T03:04:05.678Z",    +
+     "epoch": "1970-01-01T00:00:00.000Z",  +
+     "nested": {                           +
+         "when": "1999-12-31T23:59:59.999Z"+
+     },                                    +
+     "invalid": null                       +
+ }
+(1 row)
+
+-- A bare Date as the whole result.
+CREATE FUNCTION jsonb_bare_date() RETURNS jsonb AS $$
+  return new Date(Date.UTC(2026, 6, 31, 12, 0, 0, 0));
+$$ LANGUAGE pljs;
+SELECT jsonb_bare_date(), jsonb_typeof(jsonb_bare_date()) AS typ;
+      jsonb_bare_date       |  typ   
+----------------------------+--------
+ "2026-07-31T12:00:00.000Z" | string
+(1 row)
+
+-- 3) The formatting edges that overran the fixed buffer.  Sub-second pre-1970
+-- times must render a real ISO timestamp (not ".-500Z"), and a five-digit year
+-- must not be truncated.
+CREATE FUNCTION jsonb_date_edges() RETURNS jsonb AS $$
+  return {
+    minus_500ms: new Date(-500),
+    minus_1ms:   new Date(-1),
+    minus_999ms: new Date(-999),
+    minus_1s:    new Date(-1000),
+    minus_1s500: new Date(-1500),
+    year_33658:  new Date(1e15),
+    year_1901:   new Date(Date.UTC(1, 0, 1))
+  };
+$$ LANGUAGE pljs;
+SELECT jsonb_pretty(jsonb_date_edges());
+                  jsonb_pretty                  
+------------------------------------------------
+ {                                             +
+     "minus_1s": "1969-12-31T23:59:59.000Z",   +
+     "minus_1ms": "1969-12-31T23:59:59.999Z",  +
+     "year_1901": "1901-01-01T00:00:00.000Z",  +
+     "year_33658": "33658-09-27T01:46:40.000Z",+
+     "minus_1s500": "1969-12-31T23:59:58.500Z",+
+     "minus_500ms": "1969-12-31T23:59:59.500Z",+
+     "minus_999ms": "1969-12-31T23:59:59.001Z" +
+ }
+(1 row)
+
+-- The values are valid jsonb strings and re-parse.
+SELECT jsonb_date_edges()::text::jsonb = jsonb_date_edges() AS reparses;
+ reparses 
+----------
+ t
+(1 row)
+
+-- Every ISO string produced is accepted back by timestamptz, i.e. the format is
+-- correct and not merely non-crashing.
+SELECT key, (value #>> '{}')::timestamptz AS parsed_back
+FROM jsonb_each(jsonb_date_edges())
+ORDER BY key;
+     key     |           parsed_back            
+-------------+----------------------------------
+ minus_1ms   | Wed Dec 31 23:59:59.999 1969 UTC
+ minus_1s    | Wed Dec 31 23:59:59 1969 UTC
+ minus_1s500 | Wed Dec 31 23:59:58.5 1969 UTC
+ minus_500ms | Wed Dec 31 23:59:59.5 1969 UTC
+ minus_999ms | Wed Dec 31 23:59:59.001 1969 UTC
+ year_1901   | Tue Jan 01 00:00:00 1901 UTC
+ year_33658  | Fri Sep 27 01:46:40 33658 UTC
+(7 rows)
+
+-- Hammer the formatter so a one-byte overrun would corrupt the allocator.
+DO $$
+  var n = 0;
+  for (var i = 1; i <= 20000; i++) {
+    var r = pljs.execute('SELECT $1::jsonb AS j', [{d: new Date(-i * 7)}]);
+    n += (r[0].j.d || '').length;
+  }
+  pljs.elog(NOTICE, 'formatted 20000 pre-1970 dates, total length ' + n);
+$$ LANGUAGE pljs;
+NOTICE:  formatted 20000 pre-1970 dates, total length 480000
+-- A Date still round-trips through a real timestamptz column unchanged.
+CREATE FUNCTION ts_roundtrip(t timestamptz) RETURNS timestamptz AS $$
+  return t;
+$$ LANGUAGE pljs;
+SELECT ts_roundtrip('1970-01-01 00:00:00+00') = '1970-01-01 00:00:00+00'::timestamptz AS epoch_roundtrips,
+       ts_roundtrip('2026-01-02 03:04:05.678+00') = '2026-01-02 03:04:05.678+00'::timestamptz AS normal_roundtrips;
+ epoch_roundtrips | normal_roundtrips 
+------------------+-------------------
+ t                | t
+(1 row)
+
+DROP FUNCTION date_of_epoch(float8);
+DROP FUNCTION dateadt_of_epoch(float8);
+DROP FUNCTION jsonb_dates();
+DROP FUNCTION jsonb_bare_date();
+DROP FUNCTION jsonb_date_edges();
+DROP FUNCTION ts_roundtrip(timestamptz);
+RESET timezone;

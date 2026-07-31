@@ -1,0 +1,74 @@
+-- jsonb has no representation for NaN or +/-Infinity, and neither does JSON.
+-- The conversion used to push whatever float8_numeric() produced, so the datum
+-- rendered as `{"v": NaN}` -- text that is not valid JSON, cannot be re-parsed
+-- by jsonb_in, and breaks pg_dump/restore and every client JSON parser.  Such a
+-- value could be written into a table and only fail later, somewhere else.
+--
+-- JSON.stringify() emits null for these, which is also what pljs's own `json`
+-- conversion does; jsonb now agrees.
+CREATE EXTENSION IF NOT EXISTS pljs;
+NOTICE:  extension "pljs" already exists, skipping
+CREATE FUNCTION jsonb_nonfinite() RETURNS jsonb AS $$
+  return {nan: NaN, inf: Infinity, ninf: -Infinity, ok: 1.5, zero: 0, negzero: -0};
+$$ LANGUAGE pljs;
+SELECT jsonb_nonfinite();
+                               jsonb_nonfinite                                
+------------------------------------------------------------------------------
+ {"ok": 1.5, "inf": null, "nan": null, "ninf": null, "zero": 0, "negzero": 0}
+(1 row)
+
+-- The critical property: the result is valid jsonb, so it survives a text
+-- round-trip.  This failed before the fix.
+SELECT jsonb_nonfinite()::text::jsonb = jsonb_nonfinite() AS reparses;
+ reparses 
+----------
+ t
+(1 row)
+
+-- Same in an array and nested.
+CREATE FUNCTION jsonb_nonfinite_nested() RETURNS jsonb AS $$
+  return [NaN, [Infinity], {deep: -Infinity}];
+$$ LANGUAGE pljs;
+SELECT jsonb_nonfinite_nested();
+     jsonb_nonfinite_nested     
+--------------------------------
+ [null, [null], {"deep": null}]
+(1 row)
+
+SELECT jsonb_nonfinite_nested()::text::jsonb = jsonb_nonfinite_nested() AS reparses;
+ reparses 
+----------
+ t
+(1 row)
+
+-- As a bare scalar result.
+CREATE FUNCTION jsonb_bare_nan() RETURNS jsonb AS $$ return NaN; $$ LANGUAGE pljs;
+SELECT jsonb_bare_nan(), jsonb_typeof(jsonb_bare_nan()) AS typ;
+ jsonb_bare_nan | typ  
+----------------+------
+ null           | null
+(1 row)
+
+-- And the same through a bind parameter, which is how the mirror procedures
+-- would hit it.
+DO $$
+  var r = pljs.execute('SELECT $1::jsonb AS j', [{a: 1 / 0, b: Math.sqrt(-1)}]);
+  pljs.elog(NOTICE, 'bound: ' + JSON.stringify(r[0].j));
+$$ LANGUAGE pljs;
+NOTICE:  bound: {"a":null,"b":null}
+-- It can be stored and read back.
+CREATE TABLE jsonb_nonfinite_t (j jsonb);
+INSERT INTO jsonb_nonfinite_t SELECT jsonb_nonfinite();
+SELECT j -> 'nan' IS NOT NULL AS key_present,
+       jsonb_typeof(j -> 'nan') AS nan_type,
+       j ->> 'ok' AS ok
+FROM jsonb_nonfinite_t;
+ key_present | nan_type | ok  
+-------------+----------+-----
+ t           | null     | 1.5
+(1 row)
+
+DROP TABLE jsonb_nonfinite_t;
+DROP FUNCTION jsonb_nonfinite();
+DROP FUNCTION jsonb_nonfinite_nested();
+DROP FUNCTION jsonb_bare_nan();

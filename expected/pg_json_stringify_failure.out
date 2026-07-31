@@ -1,0 +1,80 @@
+-- JS_JSONStringify() returns an exception for any value JSON cannot represent.
+-- JS_ToCStringLen() then yields NULL, and the `json` conversion handed that
+-- straight to CStringGetTextDatum() -- whose strlen(NULL) segfaulted the
+-- backend.  No recursion is needed: a single BigInt is enough.
+--
+-- This is a live risk for the mirror procedures, which carry WAL LSNs around as
+-- BigInt; one reaching a `json`-typed value used to take the backend down.
+CREATE EXTENSION IF NOT EXISTS pljs;
+NOTICE:  extension "pljs" already exists, skipping
+-- 1) A BigInt anywhere in the tree: "Do not know how to serialize a BigInt".
+CREATE FUNCTION json_bigint() RETURNS json AS $$
+  return {lsn: 9223372036854775807n};
+$$ LANGUAGE pljs;
+SELECT json_bigint();
+ERROR:  could not convert JavaScript value to json
+DETAIL:  TypeError: Do not know how to serialize a BigInt
+-- 2) A bare BigInt.
+CREATE FUNCTION json_bare_bigint() RETURNS json AS $$
+  return 42n;
+$$ LANGUAGE pljs;
+SELECT json_bare_bigint();
+ERROR:  could not convert JavaScript value to json
+DETAIL:  TypeError: Do not know how to serialize a BigInt
+-- 3) A throwing toJSON().
+CREATE FUNCTION json_throwing_tojson() RETURNS json AS $$
+  return {toJSON: function() { throw new Error('boom from toJSON'); }};
+$$ LANGUAGE pljs;
+SELECT json_throwing_tojson();
+ERROR:  could not convert JavaScript value to json
+DETAIL:  Error: boom from toJSON
+-- 4) A throwing getter.
+CREATE FUNCTION json_throwing_getter() RETURNS json AS $$
+  var o = {};
+  Object.defineProperty(o, 'x', {get: function() { throw new Error('boom from getter'); },
+                                 enumerable: true});
+  return o;
+$$ LANGUAGE pljs;
+SELECT json_throwing_getter();
+ERROR:  could not convert JavaScript value to json
+DETAIL:  Error: boom from getter
+-- 5) A circular structure: JSON.stringify throws rather than recursing.
+CREATE FUNCTION json_circular() RETURNS json AS $$
+  var o = {a: 1};
+  o.self = o;
+  return o;
+$$ LANGUAGE pljs;
+SELECT json_circular();
+ERROR:  could not convert JavaScript value to json
+DETAIL:  TypeError: circular reference
+-- Values JSON *can* represent are unaffected, including the NUL-free edges.
+CREATE FUNCTION json_ok() RETURNS json AS $$
+  return {n: 1.5, s: 'text', b: true, nul: null, arr: [1, 2], nested: {k: 'v'}};
+$$ LANGUAGE pljs;
+SELECT json_ok();
+                                 json_ok                                 
+-------------------------------------------------------------------------
+ {"n":1.5,"s":"text","b":true,"nul":null,"arr":[1,2],"nested":{"k":"v"}}
+(1 row)
+
+-- Repeated failures do not accumulate errordata-stack entries either.
+DO $$
+  var caught = 0;
+  for (var i = 0; i < 50; i++) {
+    try { pljs.execute('SELECT $1::json', [{v: 1n}]); } catch (e) { caught++; }
+  }
+  pljs.elog(NOTICE, 'unstringifiable rejected: ' + caught);
+$$ LANGUAGE pljs;
+NOTICE:  unstringifiable rejected: 50
+SELECT 'backend still usable' AS status;
+        status        
+----------------------
+ backend still usable
+(1 row)
+
+DROP FUNCTION json_bigint();
+DROP FUNCTION json_bare_bigint();
+DROP FUNCTION json_throwing_tojson();
+DROP FUNCTION json_throwing_getter();
+DROP FUNCTION json_circular();
+DROP FUNCTION json_ok();
