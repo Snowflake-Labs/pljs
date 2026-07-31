@@ -565,9 +565,26 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
     for (int i = 0; i < nargs; i++) {
       bool is_null;
       Datum arg = WinGetFuncArgCurrent(window_obj, i, &is_null);
+      Oid argtype = argtypes[i];
+
+      /*
+       * Resolve polymorphic types, exactly as the non-window branch below
+       * does.  `argtypes` comes straight from pg_proc, so a window function
+       * declared `js_lag(arg anyelement)` used to convert its argument *as*
+       * anyelement: with expand_composite = false that fell through to the
+       * byte-level conversion fallback, which reinterpreted the datum as an
+       * int32.  A `date` argument therefore reached JavaScript as a raw day
+       * count rather than a Date, and a `text` argument as a meaningless
+       * integer; results only looked correct because the same wrong encoding
+       * was used to convert the value back out.
+       */
+      if (fcinfo && IsPolymorphicType(argtype)) {
+        argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
+      }
+
       // Window functions: expand_composite=false (skip composite expansion)
       argv[i] =
-          pljs_datum_to_jsvalue(argtypes[i], arg, is_null, false, context->ctx);
+          pljs_datum_to_jsvalue(argtype, arg, is_null, false, context->ctx);
     }
   } else {
     for (int i = 0; i < nargs; i++) {

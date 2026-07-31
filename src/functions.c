@@ -72,6 +72,36 @@ static JSValue pljs_window_object_to_string(JSContext *, JSValueConst, int,
 static JSValue pljs_subtransaction(JSContext *, JSValueConst, int,
                                    JSValueConst *);
 
+/**
+ * @brief Resolves a window function's argument type for value conversion.
+ *
+ * `storage->function->argtypes[]` is per-function-OID *cached* state, filled in
+ * by whichever call compiled the function first.  For a polymorphic
+ * declaration that makes the conversion type order-dependent within a session:
+ *
+ *   SELECT js_lag(id)  OVER (...)   -- caches argtypes[0] = int4
+ *   SELECT js_lag(day) OVER (...)   -- converts a date datum *as* int4
+ *
+ * so the second query handed JavaScript `2900` (a raw day count) instead of a
+ * Date, while running the date query first produced the correct value.  If the
+ * validator compiled the function (no fcinfo) the cached entry keeps the
+ * unresolved pseudo-type instead, which is not convertible at all.
+ *
+ * get_fn_expr_argtype() reports the type *this* call resolved to and equals the
+ * declared type for a non-polymorphic argument, so prefer it unconditionally.
+ */
+static Oid pljs_window_argtype(pljs_storage *storage, int argno) {
+  if (storage->fcinfo != NULL && storage->fcinfo->flinfo != NULL) {
+    Oid resolved = get_fn_expr_argtype(storage->fcinfo->flinfo, argno);
+
+    if (OidIsValid(resolved)) {
+      return resolved;
+    }
+  }
+
+  return storage->function->argtypes[argno];
+}
+
 #ifdef EXPOSE_GC
 static JSValue pljs_gc(JSContext *, JSValueConst, int, JSValueConst *);
 #endif
@@ -1654,7 +1684,7 @@ static JSValue pljs_window_get_func_arg_in_partition(JSContext *ctx,
     return JS_UNDEFINED;
   }
 
-  return pljs_datum_to_jsvalue(storage->function->argtypes[argno], res, isnull,
+  return pljs_datum_to_jsvalue(pljs_window_argtype(storage, argno), res, isnull,
                                true, ctx);
 }
 
@@ -1700,7 +1730,7 @@ static JSValue pljs_window_get_func_arg_in_frame(JSContext *ctx,
   if (isout) {
     return JS_UNDEFINED;
   }
-  return pljs_datum_to_jsvalue(storage->function->argtypes[argno], res, isnull,
+  return pljs_datum_to_jsvalue(pljs_window_argtype(storage, argno), res, isnull,
                                true, ctx);
 }
 
@@ -1732,7 +1762,7 @@ static JSValue pljs_window_get_func_arg_current(JSContext *ctx,
   }
   PG_END_TRY();
 
-  return pljs_datum_to_jsvalue(storage->function->argtypes[argno], res, isnull,
+  return pljs_datum_to_jsvalue(pljs_window_argtype(storage, argno), res, isnull,
                                true, ctx);
 }
 
