@@ -209,7 +209,9 @@ Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
 uint32_t pljs_js_array_length(JSValue, JSContext *);
 void pljs_type_fill(pljs_type *, Oid);
 bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
-                                                   TupleDesc tupdesc);
+                                                   TupleDesc tupdesc,
+                                                   char **missing_colname,
+                                                   char **provided_keys);
 bool pljs_jsvalue_is_plain_object(JSValueConst obj);
 JSValue pljs_values_to_array(JSValue *, int, int, JSContext *);
 void pljs_variable_param_setup(ParseState *, void *);

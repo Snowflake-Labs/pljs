@@ -161,8 +161,8 @@ CREATE FUNCTION snc_two_missing() RETURNS TABLE(a int, b text) LANGUAGE pljs AS 
   pljs.return_next({a: 1});
 $$;
 SELECT a FROM snc_two_missing();
-ERROR:  field name / property name mismatch
-DETAIL:  Error: field name / property name mismatch
+ERROR:  return_next: result column "b" has no matching property (object has: a; property names are case sensitive)
+DETAIL:  Error: return_next: result column "b" has no matching property (object has: a; property names are case sensitive)
     at snc_two_missing (<function>:3:19)
 
 RESET TIME ZONE;

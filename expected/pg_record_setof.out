@@ -36,8 +36,8 @@ SELECT * FROM rs_record() AS t(x int, y text) ORDER BY x;
 (2 rows)
 
 SELECT * FROM rs_record() AS t(x int, y text, z int);
-ERROR:  field name / property name mismatch
-DETAIL:  Error: field name / property name mismatch
+ERROR:  return_next: result column "z" has no matching property (object has: x, y; property names are case sensitive)
+DETAIL:  Error: return_next: result column "z" has no matching property (object has: x, y; property names are case sensitive)
     at rs_record (<function>:3:19)
 
 DROP FUNCTION rs_ok();
