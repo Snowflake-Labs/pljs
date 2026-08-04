@@ -90,9 +90,9 @@ inline static bool Is_Date(JSValueConst obj) {
  *
  * This is a real brand check (see the Is_Date note above): every builtin has
  * its own class id, so only a bare object literal / `new Object` matches.
- * Callers use it to tell a `{column: value}` row object apart from a value that
- * legitimately *is* object-like (a Date for a timestamp, a typed array for a
- * bytea, an Array for an array type).
+ * Callers use it to tell a `{column: value}` row object apart from a value
+ * that legitimately *is* an object-like datum (a Date for a timestamp, a typed
+ * array for a bytea, an Array for an array type).
  */
 bool pljs_jsvalue_is_plain_object(JSValueConst obj) {
   return JS_GetClassID(obj) == JS_CLASS_OBJECT;
@@ -976,6 +976,60 @@ static Datum pljs_jsvalue_to_datum_fallback(JSValue value, bool *is_null,
 }
 
 /**
+ * @brief Converts a JavaScript string into a #Datum through the target type's
+ * text input function.
+ *
+ * The input function parses the full decimal text exactly and raises on
+ * malformed or out-of-range input.  This is the only correct way to turn a
+ * *string* into a numeric datum: routing it through QuickJS's numeric coercion
+ * (JS_ToInt32/JS_ToInt64/JS_ToFloat64) goes via an IEEE-754 double, which
+ * silently loses precision above 2^53 -- "9223372036854775807" came out as
+ * INT64_MIN, and "123456789012345678" (only ~1.2e17) came out two off.
+ *
+ * @param typid #Oid - target type
+ * @param val #JSValue - the JavaScript string to parse
+ * @param ctx #JSContext - Javascript context to execute in
+ * @returns #Datum parsed from the string
+ */
+static Datum pljs_string_to_datum_via_input(Oid typid, JSValueConst val,
+                                            JSContext *ctx) {
+  size_t plen;
+  const char *str = JS_ToCStringLen(ctx, &plen, val);
+  Oid typinput, typioparam;
+  Datum ret;
+
+  if (str == NULL) {
+    elog(ERROR, "could not convert JavaScript value to a string");
+  }
+
+  if (memchr(str, '\0', plen) != NULL) {
+    JS_FreeCString(ctx, str);
+    ereport(ERROR,
+            (errcode(ERRCODE_UNTRANSLATABLE_CHARACTER),
+             errmsg("null byte (\\u0000) is not allowed in a value of type %s",
+                    format_type_be(typid))));
+  }
+
+  getTypeInputInfo(typid, &typinput, &typioparam);
+
+  PG_TRY();
+  {
+    ret = OidInputFunctionCall(typinput, (char *)str, typioparam, -1);
+  }
+  PG_CATCH();
+  {
+    /* Do not leak the QuickJS C-string when the input function rejects it. */
+    JS_FreeCString(ctx, str);
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  JS_FreeCString(ctx, str);
+
+  return ret;
+}
+
+/**
  * @brief Converts a Javascript value to a Postgres #Datum.
  *
  * Takes a Javascript value and converts it into a Postgres #Datum,
@@ -1070,6 +1124,12 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
 
   case INT2OID: {
     int32_t in;
+
+    /* A string carries exact decimal text; parse it, do not go via a double. */
+    if (JS_IsString(val)) {
+      return pljs_string_to_datum_via_input(INT2OID, val, ctx);
+    }
+
     if (JS_IsBigInt(ctx, val)) {
       int64_t big_in;
 
@@ -1086,6 +1146,11 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
 
   case INT4OID: {
     int32_t in;
+
+    if (JS_IsString(val)) {
+      return pljs_string_to_datum_via_input(INT4OID, val, ctx);
+    }
+
     if (JS_IsBigInt(ctx, val)) {
       int64_t big_in;
 
@@ -1102,6 +1167,11 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
 
   case INT8OID: {
     int64_t in;
+
+    if (JS_IsString(val)) {
+      return pljs_string_to_datum_via_input(INT8OID, val, ctx);
+    }
+
     if (JS_IsBigInt(ctx, val)) {
       JS_ToBigInt64(ctx, &in, val);
     } else {
@@ -1129,6 +1199,16 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
   }
 
   case NUMERICOID: {
+    /*
+     * A string carries exact decimal text, including a scale a double cannot
+     * represent, so parse it with numeric's input function rather than routing
+     * it through float8: "12345678901234567890.123456789" came back as
+     * 12345678901234600000.
+     */
+    if (JS_IsString(val)) {
+      return pljs_string_to_datum_via_input(NUMERICOID, val, ctx);
+    }
+
     if (JS_IsBigInt(ctx, val)) {
       // Convert the value to a string then convert it to NUMERIC.
       JSValue str = JS_ToString(ctx, val);

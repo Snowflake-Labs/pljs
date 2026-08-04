@@ -34,9 +34,17 @@ DO $$
   const rn = pljs.execute('SELECT NULL::int8 AS v')[0].v;
   pljs.elog(NOTICE, 'null: bindNull=' + (bn === null) + ' readNull=' + (rn === null));
 
-  // WHY BigInt and not a numeric string: pin how a JS string binds into BIGINT.
+  // A numeric *string* binds into BIGINT exactly, because a string is parsed by
+  // int8's input function rather than routed through a double.  This is the
+  // shape the adapter actually produces: runQuery() normalizes every BigInt
+  // result with String(), and those strings are then bound back into bigint
+  // parameters and bigint result columns.  It used to wrap INT64_MAX to
+  // INT64_MIN and to lose digits from ~2^53 upward (e.g. '123456789012345678'
+  // came back two off), so this asserts exactness rather than pinning the loss.
   const viaStr = pljs.execute('SELECT CAST($1 AS BIGINT) AS v', ['9223372036854775807'])[0].v;
   pljs.elog(NOTICE, 'string-bind int64_max: str=' + String(viaStr) + ' lossless=' + (viaStr === 9223372036854775807n));
+  const viaStr2 = pljs.execute('SELECT CAST($1 AS BIGINT) AS v', ['123456789012345678'])[0].v;
+  pljs.elog(NOTICE, 'string-bind 1.2e17: str=' + String(viaStr2) + ' lossless=' + (viaStr2 === 123456789012345678n));
 $$ LANGUAGE pljs;
 NOTICE:  int64_max: typeof=bigint str=9223372036854775807 lossless=true
 NOTICE:  int64_min: typeof=bigint str=-9223372036854775808 lossless=true
@@ -47,4 +55,5 @@ NOTICE:  pow53_p1: typeof=bigint str=9007199254740993 lossless=true
 NOTICE:  big: typeof=bigint str=1234567890123456789 lossless=true
 NOTICE:  pair: a=9223372036854775807 b=-9223372036854775808
 NOTICE:  null: bindNull=true readNull=true
-NOTICE:  string-bind int64_max: str=-9223372036854775808 lossless=false
+NOTICE:  string-bind int64_max: str=9223372036854775807 lossless=true
+NOTICE:  string-bind 1.2e17: str=123456789012345678 lossless=true
