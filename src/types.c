@@ -986,26 +986,29 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
 
   pljs_type_fill(&type, rettype);
 
-  if (type.typid != JSONOID && type.typid != JSONBOID && JS_IsArray(ctx, val)) {
-    return pljs_jsvalue_to_array(&type, val, ctx, fcinfo);
-  }
-
-  if (type.category == TYPCATEGORY_ARRAY && !JS_IsArray(ctx, val)) {
-    elog(ERROR, "value is not an Array");
-  }
-
   /*
-   * Check for null/undefined *before* dispatching to the composite path.
-   * pljs_jsvalue_to_record() reports SQL NULL only through its `is_null`
-   * out-parameter, but the scalar return path in pljs_call_function()
-   * discards that, so fcinfo->isnull stayed false and Postgres dereferenced
-   * (Datum) 0 as if it were a real tuple -- a backend SIGSEGV for any
-   * composite-returning function that returned null or undefined.  Handling it
-   * here routes composites through the fcinfo-aware handler below, which is
-   * the only place that can mark the result NULL for the caller.
+   * Handle null/undefined first, for every target type.
    *
-   * This deliberately stays below the array checks above so that a non-array
-   * value for an array return type keeps raising "value is not an Array"
+   * This must precede the array and composite dispatches below.  Both of those
+   * report SQL NULL only through the `is_null` out-parameter (the array check
+   * did not report it at all -- it raised), but the scalar return path in
+   * pljs_call_function() discards that out-parameter, so fcinfo->isnull is the
+   * only channel Postgres reads.  Doing the check here is what lets a NULL
+   * result reach the caller correctly regardless of the target type:
+   *
+   *   - For a composite, dispatching first meant Postgres was handed
+   *     (Datum) 0 as if it were a real tuple -> backend SIGSEGV.
+   *   - For an array type, the TYPCATEGORY_ARRAY check below rejected
+   *     null/undefined with "value is not an Array", so an array-typed result
+   *     or bind parameter could not be NULL at all -- even though every other
+   *     place that walks a value already treats null/undefined as NULL (the
+   *     array element loop, pljs_jsvalue_to_datums(), and the composite column
+   *     loop in pljs_jsvalue_to_record() all short-circuit it).  That blocked
+   *     `pljs.execute(sql, [null])` against an array parameter outright.
+   *
+   * A non-null value of the wrong shape still raises: the array check below
+   * only ever sees values that are neither null nor undefined, so returning a
+   * number, string or plain object for an array type keeps failing loudly
    * instead of silently becoming NULL.
    */
   if (JS_IsNull(val) || JS_IsUndefined(val)) {
@@ -1018,6 +1021,14 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
 
       return (Datum) 0;
     }
+  }
+
+  if (type.typid != JSONOID && type.typid != JSONBOID && JS_IsArray(ctx, val)) {
+    return pljs_jsvalue_to_array(&type, val, ctx, fcinfo);
+  }
+
+  if (type.category == TYPCATEGORY_ARRAY && !JS_IsArray(ctx, val)) {
+    elog(ERROR, "value is not an Array");
   }
 
   if (type.is_composite) {

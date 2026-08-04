@@ -1,0 +1,127 @@
+-- null/undefined against an array-typed target, across element types and paths.
+--
+-- pljs_jsvalue_to_datum() rejected a null or undefined value for any array type
+-- with "value is not an Array", because the TYPCATEGORY_ARRAY shape check ran
+-- before the null/undefined check.  An array-typed value therefore could not be
+-- NULL at all:
+--
+--   * a function RETURNS <anything>[] could not return SQL NULL;
+--   * pljs.execute(sql, [null]) against an array parameter raised, so a
+--     procedure could not bind a NULL array -- note this path has no
+--     FunctionCallInfo, so it reports NULL through the is_null out-parameter;
+--   * pljs.return_next(null) for a SETOF array type raised.
+--
+-- This was also internally inconsistent: the array element loop,
+-- pljs_jsvalue_to_datums() and the composite column loop in
+-- pljs_jsvalue_to_record() all already short-circuit null/undefined to SQL
+-- NULL, so only the top-level conversion refused it.
+--
+-- The check now runs first, for every target type.  A non-null value of the
+-- wrong shape must still raise, which the last section pins.
+CREATE EXTENSION IF NOT EXISTS pljs;
+
+-- 1) RETURNS <array type>: null must be SQL NULL for every element type.
+CREATE FUNCTION anr_int4() RETURNS int[] LANGUAGE pljs AS $$ return null; $$;
+CREATE FUNCTION anr_int8() RETURNS bigint[] LANGUAGE pljs AS $$ return null; $$;
+CREATE FUNCTION anr_text() RETURNS text[] LANGUAGE pljs AS $$ return null; $$;
+CREATE FUNCTION anr_jsonb() RETURNS jsonb[] LANGUAGE pljs AS $$ return null; $$;
+CREATE FUNCTION anr_uuid() RETURNS uuid[] LANGUAGE pljs AS $$ return null; $$;
+CREATE FUNCTION anr_numeric() RETURNS numeric[] LANGUAGE pljs AS $$ return null; $$;
+CREATE FUNCTION anr_bool() RETURNS bool[] LANGUAGE pljs AS $$ return null; $$;
+CREATE FUNCTION anr_tstz() RETURNS timestamptz[] LANGUAGE pljs AS $$ return null; $$;
+CREATE FUNCTION anr_bytea() RETURNS bytea[] LANGUAGE pljs AS $$ return null; $$;
+CREATE FUNCTION anr_float8() RETURNS float8[] LANGUAGE pljs AS $$ return null; $$;
+SELECT anr_int4() IS NULL AS int4, anr_int8() IS NULL AS int8,
+       anr_text() IS NULL AS text, anr_jsonb() IS NULL AS jsonb,
+       anr_uuid() IS NULL AS uuid;
+SELECT anr_numeric() IS NULL AS numeric, anr_bool() IS NULL AS bool,
+       anr_tstz() IS NULL AS tstz, anr_bytea() IS NULL AS bytea,
+       anr_float8() IS NULL AS float8;
+
+-- 2) undefined and a bare "no return" behave the same as null.
+CREATE FUNCTION anr_undef() RETURNS int[] LANGUAGE pljs AS $$ return undefined; $$;
+CREATE FUNCTION anr_noret() RETURNS text[] LANGUAGE pljs AS $$ var x = 1; $$;
+SELECT anr_undef() IS NULL AS undef_is_sqlnull,
+       anr_noret() IS NULL AS noreturn_is_sqlnull;
+
+-- 3) binding SQL NULL to an array parameter through pljs.execute.  This path
+-- runs with fcinfo = NULL, so it exercises the is_null out-parameter branch.
+DO $$
+  const types = ['int[]', 'bigint[]', 'text[]', 'jsonb[]', 'uuid[]',
+                 'numeric[]', 'bool[]', 'timestamptz[]'];
+  const bad = [];
+  for (const t of types) {
+    const v = pljs.execute('SELECT $1::' + t + ' AS v', [null])[0].v;
+    if (v !== null) { bad.push(t + '=' + JSON.stringify(v)); }
+  }
+  pljs.elog(NOTICE, 'all array types bind null -> ' + (bad.length === 0) +
+                    (bad.length ? ' failures: ' + bad.join(',') : ''));
+$$ LANGUAGE pljs;
+
+-- a NULL array bind must be distinguishable from an empty array bind.
+DO $$
+  const n = pljs.execute('SELECT $1::int[] AS v', [null])[0].v;
+  const e = pljs.execute('SELECT $1::int[] AS v', [[]])[0].v;
+  pljs.elog(NOTICE, 'null=' + JSON.stringify(n) + ' empty=' + JSON.stringify(e));
+$$ LANGUAGE pljs;
+
+-- round-trip a NULL array through a real table column.
+CREATE TABLE anr_t (id int, vals int[]);
+DO $$
+  pljs.execute('INSERT INTO anr_t VALUES ($1, $2)', [1, null]);
+  pljs.execute('INSERT INTO anr_t VALUES ($1, $2)', [2, [10, 20]]);
+$$ LANGUAGE pljs;
+SELECT id, vals IS NULL AS vals_null, vals FROM anr_t ORDER BY id;
+
+-- 4) SETOF an array type: a null row is a NULL row, not an error.
+CREATE FUNCTION anr_setof() RETURNS SETOF int[] LANGUAGE pljs AS $$
+  pljs.return_next(null);
+  pljs.return_next([1, 2]);
+  pljs.return_next(undefined);
+$$;
+SELECT coalesce(x::text, 'NULL') AS row_value FROM anr_setof() AS x;
+
+-- 5) an array-typed column of a composite (this path already worked; pin it so
+-- the top-level fix stays consistent with the composite column loop).
+CREATE TYPE anr_ct AS (a int[], b text[]);
+CREATE FUNCTION anr_comp() RETURNS anr_ct LANGUAGE pljs AS $$
+  return {a: null, b: ['x']};
+$$;
+SELECT (anr_comp()).a IS NULL AS a_null, (anr_comp()).b AS b;
+
+-- 6) real array values must be unaffected, including the empty array and an
+-- array containing NULL elements.
+CREATE FUNCTION anr_vals() RETURNS int[] LANGUAGE pljs AS $$ return [1, 2, 3]; $$;
+CREATE FUNCTION anr_empty() RETURNS int[] LANGUAGE pljs AS $$ return []; $$;
+CREATE FUNCTION anr_holes() RETURNS int[] LANGUAGE pljs AS $$ return [1, null, 3]; $$;
+CREATE FUNCTION anr_txtvals() RETURNS text[] LANGUAGE pljs AS $$ return ['a', null, 'c']; $$;
+SELECT anr_vals() AS vals, anr_empty() AS empty,
+       anr_holes() AS holes, anr_txtvals() AS txtvals;
+SELECT anr_empty() IS NULL AS empty_is_not_null;
+
+-- 7) a non-null value of the wrong shape must still raise "value is not an
+-- Array" -- the fix must not turn a genuine binding mistake into a silent NULL.
+CREATE FUNCTION anr_bad_num() RETURNS int[] LANGUAGE pljs AS $$ return 5; $$;
+CREATE FUNCTION anr_bad_str() RETURNS int[] LANGUAGE pljs AS $$ return 'nope'; $$;
+CREATE FUNCTION anr_bad_obj() RETURNS int[] LANGUAGE pljs AS $$ return {a: 1}; $$;
+SELECT anr_bad_num();
+SELECT anr_bad_str();
+SELECT anr_bad_obj();
+
+-- and the same for a bind parameter.
+DO $$
+  try {
+    pljs.execute('SELECT $1::int[] AS v', [42]);
+    pljs.elog(NOTICE, 'unexpectedly accepted a number for int[]');
+  } catch (e) {
+    pljs.elog(NOTICE, 'bind wrong shape still raises: ' +
+                      (e.message.indexOf('not an Array') >= 0));
+  }
+$$ LANGUAGE pljs;
+
+DROP TABLE anr_t;
+DROP FUNCTION anr_int4, anr_int8, anr_text, anr_jsonb, anr_uuid, anr_numeric,
+  anr_bool, anr_tstz, anr_bytea, anr_float8, anr_undef, anr_noret, anr_setof,
+  anr_comp, anr_vals, anr_empty, anr_holes, anr_txtvals, anr_bad_num,
+  anr_bad_str, anr_bad_obj;
+DROP TYPE anr_ct;

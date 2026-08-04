@@ -121,10 +121,18 @@ DO $$
   pljs.elog(NOTICE, 'bind null uuid/text -> ' + (u === null) + ' ' + (t === null));
 $$ LANGUAGE pljs;
 NOTICE:  bind null uuid/text -> true true
--- 5) an array return type must keep raising rather than silently becoming NULL
--- (the null check deliberately sits below the array checks).
+-- 5) an array return type: null/undefined is SQL NULL like any other type (the
+-- full matrix lives in pg_array_null_returns.sql), while a non-null value of
+-- the wrong shape must still raise rather than silently becoming NULL.
 CREATE FUNCTION nrp_arr_null() RETURNS int[] LANGUAGE pljs AS $$ return null; $$;
-SELECT nrp_arr_null();
+SELECT nrp_arr_null() IS NULL AS arr_null_is_sqlnull;
+ arr_null_is_sqlnull 
+---------------------
+ t
+(1 row)
+
+CREATE FUNCTION nrp_arr_bad() RETURNS int[] LANGUAGE pljs AS $$ return 5; $$;
+SELECT nrp_arr_bad();
 ERROR:  value is not an Array
 -- the backend is still alive and pljs still works after all of the above.
 SELECT nrp_ct_value() IS NULL AS still_working;
@@ -135,6 +143,6 @@ SELECT nrp_ct_value() IS NULL AS still_working;
 
 DROP FUNCTION nrp_ct_null, nrp_ct_undef, nrp_ct_value, nrp_rec_null,
   nrp_rec_undef, nrp_rec_value, nrp_uuid, nrp_inet, nrp_interval,
-  nrp_domain_fn, nrp_time, nrp_uuid_value, nrp_arr_null;
+  nrp_domain_fn, nrp_time, nrp_uuid_value, nrp_arr_null, nrp_arr_bad;
 DROP DOMAIN nrp_domain;
 DROP TYPE nrp_composite;
