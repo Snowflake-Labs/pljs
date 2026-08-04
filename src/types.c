@@ -2194,6 +2194,21 @@ static JsonbValue *jsonb_array_from_array(JSValue array,
      */
     if (Is_Date(elem)) {
       value = jsonb_from_value(elem, pstate, WJB_ELEM, ctx, NULL);
+    } else if (JS_IsUndefined(elem)) {
+      /*
+       * An undefined *element* is JSON null, not an omitted element.  Skipping
+       * it shortened the array and shifted every later index:
+       * `[1, undefined, 3]` became `[1,3]` with length 2, while
+       * JSON.stringify() of the same value is `[1,null,3]`.  For a mirrored
+       * payload that silently rewrites the data.
+       *
+       * Note this differs from an undefined object *value*, which JSON drops
+       * along with its key (`{a: undefined}` is `{}`); that behaviour is
+       * correct and unchanged, and is handled by jsonb_from_value().
+       */
+      JsonbValue null_val = {.type = jbvNull};
+
+      value = jsonb_push(pstate, WJB_ELEM, &null_val);
     } else if (JS_IsFunction(ctx, elem)) {
       JsonbValue null_val = {.type = jbvNull};
 

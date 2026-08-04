@@ -1,0 +1,96 @@
+-- An undefined array element becomes JSON null instead of vanishing.
+--
+-- The JS -> jsonb conversion returned "no value" for undefined, which for an
+-- array *element* meant the element was never appended.  That shortened the
+-- array and shifted every later index:
+--
+--   [1, undefined, 3]  ->  [1,3]     length 2   (jsonb)
+--   [1, undefined, 3]  ->  [1,null,3] length 3  (JSON.stringify)
+--
+-- For a mirrored payload that silently rewrites the data: a positional array
+-- loses its alignment, and nothing downstream can tell.
+--
+-- An undefined object *value* is still dropped along with its key, because that
+-- is what JSON does (`JSON.stringify({a: undefined})` is `{}`).  The two cases
+-- are deliberately asymmetric and both now match JSON.stringify().
+CREATE EXTENSION IF NOT EXISTS pljs;
+NOTICE:  extension "pljs" already exists, skipping
+-- 1) the element becomes null and the length is preserved.
+DO $$
+  const src = [1, undefined, 3];
+  const j = pljs.execute('SELECT $1::jsonb AS j', [src])[0].j;
+  pljs.elog(NOTICE, 'jsonb=' + JSON.stringify(j) + ' len=' + j.length);
+  pljs.elog(NOTICE, 'matches JSON.stringify: ' +
+                    (JSON.stringify(j) === JSON.stringify(src)));
+$$ LANGUAGE pljs;
+NOTICE:  jsonb=[1,null,3] len=3
+NOTICE:  matches JSON.stringify: true
+-- 2) positions are preserved, which is the point.
+DO $$
+  const j = pljs.execute('SELECT $1::jsonb AS j', [['a', undefined, 'c']])[0].j;
+  pljs.elog(NOTICE, 'index 2 is still "c": ' + (j[2] === 'c') +
+                    ' (was "' + j[1] + '" at index 1)');
+$$ LANGUAGE pljs;
+NOTICE:  index 2 is still "c": true (was "null" at index 1)
+-- 3) an undefined object value is still omitted with its key (JSON semantics).
+DO $$
+  const j = pljs.execute('SELECT $1::jsonb AS j', [{a: 1, b: undefined, c: 3}])[0].j;
+  pljs.elog(NOTICE, 'object keys=' + Object.keys(j).sort().join(',') +
+                    ' hasB=' + ('b' in j));
+$$ LANGUAGE pljs;
+NOTICE:  object keys=a,c hasB=false
+-- 4) nested arrays and objects follow the same rules.
+DO $$
+  const src = [[undefined], {x: undefined}, undefined];
+  const j = pljs.execute('SELECT $1::jsonb AS j', [src])[0].j;
+  pljs.elog(NOTICE, 'nested=' + JSON.stringify(j) +
+                    ' matches=' + (JSON.stringify(j) === JSON.stringify(src)));
+$$ LANGUAGE pljs;
+NOTICE:  nested=[[null],{},null] matches=true
+-- 5) an explicit null, and a trailing/leading undefined, behave as JSON does.
+DO $$
+  const cases = [[1, null, 3], [undefined, 2], [1, undefined],
+                 [undefined], [undefined, undefined]];
+  const bad = [];
+  for (const src of cases) {
+    const j = pljs.execute('SELECT $1::jsonb AS j', [src])[0].j;
+    if (JSON.stringify(j) !== JSON.stringify(src)) {
+      bad.push(JSON.stringify(src) + ' -> ' + JSON.stringify(j));
+    }
+  }
+  pljs.elog(NOTICE, 'all array shapes match JSON.stringify: ' + (bad.length === 0) +
+                    (bad.length ? ' failures: ' + bad.join(', ') : ''));
+$$ LANGUAGE pljs;
+NOTICE:  all array shapes match JSON.stringify: true
+-- 6) the same through a jsonb return value and a jsonb result column, and the
+-- value must survive a round-trip through storage.
+CREATE FUNCTION uae_ret() RETURNS jsonb LANGUAGE pljs AS $$
+  return [1, undefined, 3];
+$$;
+SELECT uae_ret(), jsonb_array_length(uae_ret()) AS len;
+   uae_ret    | len 
+--------------+-----
+ [1, null, 3] |   3
+(1 row)
+
+CREATE FUNCTION uae_col() RETURNS TABLE(j jsonb, k int) LANGUAGE pljs AS $$
+  pljs.return_next({j: [1, undefined, 3], k: 1});
+$$;
+SELECT j, jsonb_array_length(j) AS len FROM uae_col();
+      j       | len 
+--------------+-----
+ [1, null, 3] |   3
+(1 row)
+
+-- 7) json (not jsonb) is produced by JSON.stringify and was already correct;
+-- pin that the two agree.
+CREATE FUNCTION uae_json() RETURNS json LANGUAGE pljs AS $$
+  return [1, undefined, 3];
+$$;
+SELECT uae_json()::jsonb = uae_ret() AS json_and_jsonb_agree;
+ json_and_jsonb_agree 
+----------------------
+ t
+(1 row)
+
+DROP FUNCTION uae_ret, uae_col, uae_json;
