@@ -1203,6 +1203,25 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
   }
 
   case BOOLOID: {
+    /*
+     * A string is parsed by bool's input function, not coerced with JS_ToBool.
+     *
+     * JS_ToBool() reports every non-empty string as true, so "false", "f", "no"
+     * and "0" all became true while "" became false -- the exact opposite of
+     * what the text means.  plv8 routed a bool bind through the type's input
+     * function, and this difference is what silently broke the snowflake_cdc
+     * `needs_snapshot` flag on the port: it was written with
+     * `needsSnapshot ? "true" : "false"`, so the flag was set true and never
+     * cleared, and every change batch then skipped its rows.
+     *
+     * The input function accepts exactly what SQL accepts (true/false, t/f,
+     * yes/no, on/off, 1/0, any case, surrounded by optional whitespace) and
+     * raises on anything else instead of guessing.
+     */
+    if (JS_IsString(val)) {
+      return pljs_string_to_datum_via_input(BOOLOID, val, ctx);
+    }
+
     int8_t in = JS_ToBool(ctx, val);
     PG_RETURN_BOOL(in);
     break;
