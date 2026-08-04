@@ -1274,7 +1274,23 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
       pljs_type type;
       pljs_type_fill(&type, rettype);
 
-      datum = pljs_jsvalue_to_record(&type, ret, NULL, tupdesc, context->ctx);
+      /*
+       * Pass a real out-parameter rather than NULL: a `RETURNS record`
+       * function that returns null or undefined lands in the null branch of
+       * pljs_jsvalue_to_record(), which used to dereference this pointer.
+       * Propagate the result to fcinfo->isnull, the only channel Postgres
+       * reads, so the row comes back as SQL NULL instead of Postgres treating
+       * (Datum) 0 as a tuple.
+       */
+      bool record_is_null = false;
+
+      datum = pljs_jsvalue_to_record(&type, ret, &record_is_null, tupdesc,
+                                     context->ctx);
+
+      if (record_is_null) {
+        fcinfo->isnull = true;
+        datum = (Datum) 0;
+      }
     } else {
       bool is_null;
       datum =

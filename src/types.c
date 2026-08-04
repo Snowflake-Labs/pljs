@@ -822,9 +822,14 @@ Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
   Datum result = 0;
 
   // If the value is null or undefined, we can simply set the record to null
-  // and return a `NULL` Datum.
+  // and return a `NULL` Datum.  `is_null` is optional: pljs_call_function()
+  // passes NULL for it on the RECORDOID path, so dereferencing it
+  // unconditionally crashed the backend for a `RETURNS record` function that
+  // returned null or undefined.
   if (JS_IsNull(val) || JS_IsUndefined(val)) {
-    *is_null = true;
+    if (is_null) {
+      *is_null = true;
+    }
     return (Datum)0;
   }
 
@@ -887,10 +892,13 @@ Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
  * @param is_null @c bool - pointer to fill of whether the value is null
  * @param type #pljs_type - type of the datum
  * @param ctx #JSContext - Javascript context
+ * @param fcinfo #FunctionCallInfo - call info to report SQL NULL through, or
+ *   NULL when converting a bind parameter (no FunctionCallInfo available)
  * @returns #Datum conversion of the JSValue
  */
 static Datum pljs_jsvalue_to_datum_fallback(JSValue value, bool *is_null,
-                                            pljs_type type, JSContext *ctx) {
+                                            pljs_type type, JSContext *ctx,
+                                            FunctionCallInfo fcinfo) {
   Oid typinput, typioparam;
   size_t plen;
   const char *str;
@@ -903,8 +911,16 @@ static Datum pljs_jsvalue_to_datum_fallback(JSValue value, bool *is_null,
   JS_FreeValue(ctx, is_set_null_value);
 
   // If the value's property of `null` is set to `true`, we return an empty
-  // Datum.
+  // Datum.  When a FunctionCallInfo is available it is the only channel
+  // Postgres reads, so report the NULL there: the scalar return path in
+  // pljs.c discards the *is_null out-parameter, and leaving fcinfo->isnull
+  // false made Postgres treat (Datum) 0 as a real value -- a garbage result
+  // for a by-value type and a NULL-pointer dereference for a by-reference one.
   if (explicit_null) {
+    if (fcinfo) {
+      PG_RETURN_NULL();
+    }
+
     if (is_null) {
       *is_null = true;
     }
@@ -978,10 +994,20 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     elog(ERROR, "value is not an Array");
   }
 
-  if (type.is_composite) {
-    return pljs_jsvalue_to_record(&type, val, is_null, NULL, ctx);
-  }
-
+  /*
+   * Check for null/undefined *before* dispatching to the composite path.
+   * pljs_jsvalue_to_record() reports SQL NULL only through its `is_null`
+   * out-parameter, but the scalar return path in pljs_call_function()
+   * discards that, so fcinfo->isnull stayed false and Postgres dereferenced
+   * (Datum) 0 as if it were a real tuple -- a backend SIGSEGV for any
+   * composite-returning function that returned null or undefined.  Handling it
+   * here routes composites through the fcinfo-aware handler below, which is
+   * the only place that can mark the result NULL for the caller.
+   *
+   * This deliberately stays below the array checks above so that a non-array
+   * value for an array return type keeps raising "value is not an Array"
+   * instead of silently becoming NULL.
+   */
   if (JS_IsNull(val) || JS_IsUndefined(val)) {
     if (fcinfo) {
       PG_RETURN_NULL();
@@ -992,6 +1018,10 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
 
       return (Datum) 0;
     }
+  }
+
+  if (type.is_composite) {
+    return pljs_jsvalue_to_record(&type, val, is_null, NULL, ctx);
   }
 
   switch (rettype) {
@@ -1381,12 +1411,19 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     break;
 
   default:
-    return pljs_jsvalue_to_datum_fallback(val, is_null, type, ctx);
+    return pljs_jsvalue_to_datum_fallback(val, is_null, type, ctx, fcinfo);
   }
 
   // shut up, compiler
-  if (is_null) { *is_null = true; }
-  return (Datum) 0;
+  if (is_null) {
+    *is_null = true;
+  }
+
+  if (fcinfo) {
+    PG_RETURN_NULL();
+  } else {
+    PG_RETURN_VOID();
+  }
 }
 
 /**
