@@ -92,7 +92,13 @@ DO $$
   const res = pljs.execute(`select $1::bytea`, [test]);
   const result = res[0].bytea;
 
-  if (result === test) {
+  // A bytea result is a Uint8Array of the exact stored bytes, not a string.
+  // Decoding the bytes as UTF-8 into a JS string would replace every byte that
+  // is not valid UTF-8 with U+FFFD and lose it, so compare the bytes -- which is
+  // what this round-trip is really asserting.
+  const decoded = String.fromCharCode.apply(null, result);
+
+  if (decoded === test) {
     pljs.elog(INFO, 'OK');
   } else {
     pljs.elog(WARNING, 'FAIL');

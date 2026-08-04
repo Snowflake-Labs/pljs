@@ -599,13 +599,40 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
   }
 
   case BYTEAOID: {
+    /*
+     * Surface bytea as a Uint8Array, not a string.
+     *
+     * JS_NewStringLen() decodes its input as UTF-8, so any byte sequence that is
+     * not valid UTF-8 was replaced with U+FFFD and the original bytes were gone
+     * for good -- not merely re-encoded.  decode('deadbeef','hex') arrived in
+     * JavaScript as a *two* character string and wrote back as `deadefbfbd`, and
+     * every 0xFF byte became efbfbd.  Any bytea that is not plain ASCII was
+     * silently destroyed by a round-trip through JS.
+     *
+     * A Uint8Array carries the bytes exactly, indexes and has .length like the
+     * string did, and is what plv8 hands back (so this also makes the port more
+     * compatible, not less).  The JS -> bytea direction already accepts typed
+     * arrays, so the value round-trips.
+     */
     void *p = PG_DETOAST_DATUM_COPY(arg);
-    char *buf = palloc(VARSIZE_ANY_EXHDR(p) + 1);
+    size_t len = VARSIZE_ANY_EXHDR(p);
+    JSValue buffer =
+        JS_NewArrayBufferCopy(ctx, (const uint8_t *)VARDATA_ANY(p), len);
+    JSValueConst ta_args[1] = {buffer};
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue ctor = JS_GetPropertyStr(ctx, global, "Uint8Array");
 
-    memcpy(buf, VARDATA(p), VARSIZE_ANY_EXHDR(p));
+    /*
+     * Go through the real Uint8Array constructor rather than
+     * JS_NewTypedArray(): the latter passes JS_UNDEFINED as new_target, which
+     * builds a view of length 0 over the buffer instead of one spanning it.
+     */
+    return_result = JS_CallConstructor(ctx, ctor, 1, ta_args);
 
-    return_result = JS_NewStringLen(ctx, buf, VARSIZE_ANY_EXHDR(p));
-    pfree(buf);
+    JS_FreeValue(ctx, ctor);
+    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, buffer);
+    pfree(p);
     break;
   }
 

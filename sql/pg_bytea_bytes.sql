@@ -1,0 +1,93 @@
+-- A bytea result carries its exact bytes into JavaScript.
+--
+-- bytea was handed to JavaScript with JS_NewStringLen(), which decodes its input
+-- as UTF-8.  Any byte sequence that is not valid UTF-8 was replaced with U+FFFD
+-- and the original bytes were gone for good -- not merely re-encoded:
+--
+--   decode('deadbeef','hex')  ->  a *two* character string, back as deadefbfbd
+--   decode('ff00fe','hex')    ->  back as efbfbd00efbfbd
+--
+-- So any bytea that was not plain ASCII was silently destroyed by a round-trip
+-- through JS, with nothing downstream able to detect it.
+--
+-- A bytea result is now a Uint8Array.  It carries the bytes exactly, and still
+-- indexes and has .length as the string did.  This is also what plv8 returns, so
+-- plv8's own idiom -- String.fromCharCode.apply(null, bytea) -- works, and the
+-- port is more compatible rather than less.  The JavaScript -> bytea direction
+-- already accepted typed arrays, so values round-trip.
+CREATE EXTENSION IF NOT EXISTS pljs;
+
+-- 1) every byte survives a round-trip, including invalid UTF-8, NUL and empty.
+DO $$
+  const cases = ['deadbeef', 'ff00fe', '00', '0001027f80fffe', '48656c6c6f', ''];
+  const bad = [];
+  for (const h of cases) {
+    const b = pljs.execute('SELECT decode($1, $2) AS b', [h, 'hex'])[0].b;
+    const back = pljs.execute('SELECT encode($1::bytea, $2) AS h', [b, 'hex'])[0].h;
+    if (back !== h) { bad.push(h + ' -> ' + back); }
+  }
+  pljs.elog(NOTICE, 'all bytea round-trips intact: ' + (bad.length === 0) +
+                    (bad.length ? ' failures: ' + bad.join(', ') : ''));
+$$ LANGUAGE pljs;
+
+-- 2) the length is the byte length, not a decoded character count.
+DO $$
+  const b = pljs.execute("SELECT decode('deadbeef','hex') AS b")[0].b;
+  pljs.elog(NOTICE, 'deadbeef length=' + b.length + ' (was 2 as a UTF-8 string)');
+  pljs.elog(NOTICE, 'is Uint8Array=' + (b instanceof Uint8Array) +
+                    ' bytes=' + b[0] + ',' + b[1] + ',' + b[2] + ',' + b[3]);
+$$ LANGUAGE pljs;
+
+-- 3) plv8's idiom for reading a bytea result works.
+DO $$
+  const b = pljs.execute("SELECT 'abc'::bytea AS b")[0].b;
+  pljs.elog(NOTICE, 'fromCharCode=' + String.fromCharCode.apply(null, b));
+$$ LANGUAGE pljs;
+
+-- 4) a bytea column read from a table, and one carried through a function.
+CREATE TABLE bb_t (id int, b bytea);
+INSERT INTO bb_t VALUES (1, decode('ff00fe', 'hex')), (2, decode('', 'hex'));
+DO $$
+  const rows = pljs.execute('SELECT id, b FROM bb_t ORDER BY id');
+  for (const r of rows) {
+    pljs.elog(NOTICE, 'row ' + r.id + ' length=' + r.b.length);
+  }
+$$ LANGUAGE pljs;
+CREATE FUNCTION bb_passthrough(x bytea) RETURNS bytea LANGUAGE pljs AS $$
+  return x;
+$$;
+SELECT encode(bb_passthrough(decode('ff00fe', 'hex')), 'hex') AS passthrough_hex;
+SELECT encode(bb_passthrough(decode('deadbeef', 'hex')), 'hex') AS passthrough_hex2;
+
+-- 5) the write direction still accepts every form it used to.
+CREATE FUNCTION bb_from_u8() RETURNS bytea LANGUAGE pljs AS $$
+  return new Uint8Array([255, 0, 254]);
+$$;
+CREATE FUNCTION bb_from_buffer() RETURNS bytea LANGUAGE pljs AS $$
+  return new ArrayBuffer(4);
+$$;
+CREATE FUNCTION bb_from_string() RETURNS bytea LANGUAGE pljs AS $$
+  return 'abc';
+$$;
+SELECT encode(bb_from_u8(), 'hex') AS from_u8,
+       length(bb_from_buffer()) AS buffer_len,
+       encode(bb_from_string(), 'hex') AS from_string;
+
+-- 6) a large value is not truncated anywhere along the way.
+DO $$
+  const b = pljs.execute("SELECT decode(repeat('ff', 5000), 'hex') AS b")[0].b;
+  const back = pljs.execute('SELECT length($1::bytea) AS n', [b])[0].n;
+  pljs.elog(NOTICE, 'large: js_len=' + b.length + ' back_len=' + back);
+$$ LANGUAGE pljs;
+
+-- 7) NULL is still NULL.
+CREATE FUNCTION bb_null() RETURNS bytea LANGUAGE pljs AS $$ return null; $$;
+SELECT bb_null() IS NULL AS null_ok;
+DO $$
+  pljs.elog(NOTICE, 'bind null bytea -> ' +
+    (pljs.execute('SELECT $1::bytea AS v', [null])[0].v === null));
+$$ LANGUAGE pljs;
+
+DROP TABLE bb_t;
+DROP FUNCTION bb_passthrough, bb_from_u8, bb_from_buffer, bb_from_string,
+  bb_null;

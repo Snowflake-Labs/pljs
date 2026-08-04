@@ -47,12 +47,14 @@ SELECT length(pp_int16array_bytea(20));
 DROP FUNCTION pp_arraybuffer_bytea(integer);
 DROP FUNCTION pp_int16array_bytea(integer);
 
--- bytea (result path) DIVERGENCE: plv8 surfaces a bytea result column as an
--- ArrayBuffer/typed array, so plv8's bytea.sql reads it with
--- String.fromCharCode.apply(null, bytea). pljs surfaces it as a JS string, so
--- that idiom throws ("not a object") on pljs. We pin pljs's actual behaviour
--- (typeof === 'string') rather than porting plv8's expected. See PROVENANCE.md.
+-- bytea (result path): a bytea result column is a Uint8Array, matching plv8, so
+-- plv8's own idiom -- String.fromCharCode.apply(null, bytea) -- works here too.
+-- This used to be a divergence: pljs surfaced a JS string, which threw on that
+-- idiom and, worse, silently destroyed any byte that was not valid UTF-8 (see
+-- sql/pg_bytea_bytes.sql).  Both engines now agree.
 DO LANGUAGE pljs $$
   const b = pljs.execute("select 'abc'::bytea AS x")[0].x;
   pljs.elog(NOTICE, 'bytea result typeof=' + (typeof b) + ' value=' + b);
+  pljs.elog(NOTICE, 'plv8 idiom works: ' +
+                    (String.fromCharCode.apply(null, b) === 'abc'));
 $$;
