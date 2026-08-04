@@ -210,6 +210,7 @@ uint32_t pljs_js_array_length(JSValue, JSContext *);
 void pljs_type_fill(pljs_type *, Oid);
 bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
                                                    TupleDesc tupdesc);
+bool pljs_jsvalue_is_plain_object(JSValueConst obj);
 JSValue pljs_values_to_array(JSValue *, int, int, JSContext *);
 void pljs_variable_param_setup(ParseState *, void *);
 ParamListInfo pljs_setup_variable_paramlist(pljs_param_state *, Datum *,

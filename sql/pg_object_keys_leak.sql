@@ -32,14 +32,23 @@ SELECT count(*) = 20000 AS jsonb_object_return_ok FROM jsonb_obj_leak(20000);
 
 -- 2) composite return_next (contains_all_column_names): the enumerated table is
 -- sized by *all* of the object's own keys, not just the target columns, so a
--- one-column result fed a fat object leaks a big table per row.  20k rows of a
+-- result fed a fat object leaks a big table per row.  20k rows of a
 -- ~800-key object is ~128MB of leaked tables vs the 64MB cap -> OOM pre-fix.
-CREATE FUNCTION composite_obj_leak(n int) RETURNS TABLE(a int) LANGUAGE pljs AS $$
-  var o = {a: 0};
+--
+-- NB: this must declare two or more columns.  A single-column set is not
+-- "composite", so return_next() takes the scalar path and never reaches
+-- pljs_jsvalue_object_contains_all_column_names() -- the very function whose
+-- leak this case exists to cover.  (One column also silently stored 0 for every
+-- row, because the whole object went through the int4 conversion; the value
+-- assertions below would now catch that.)
+CREATE FUNCTION composite_obj_leak(n int) RETURNS TABLE(a int, b int) LANGUAGE pljs AS $$
+  var o = {a: 0, b: 0};
   for (var k = 0; k < 800; k++) o["x" + k] = k;
-  for (var i = 0; i < n; i++) { o.a = i; pljs.return_next(o); }
+  for (var i = 0; i < n; i++) { o.a = i; o.b = i + 1; pljs.return_next(o); }
 $$;
-SELECT count(*) = 20000 AS composite_return_next_ok FROM composite_obj_leak(20000);
+SELECT count(*) = 20000 AS composite_return_next_ok,
+       min(a) = 0 AND max(a) = 19999 AS composite_values_ok
+  FROM composite_obj_leak(20000);
 
 -- The backend survived both loops and is still usable.
 SELECT 1 AS alive;
