@@ -1,0 +1,142 @@
+# Snowflake-Labs CI for the pljs hardening branches.
+#
+# Modelled on upstream's .github/workflows/build_and_test.yml (build PostgreSQL
+# from source, start a real cluster, `make install && make installcheck`) with
+# these deliberate differences:
+#
+#   * PostgreSQL 19 is in the matrix.  Upstream tests 16/17/18 only, even though
+#     it added PG 19 support -- and PG 19 is exactly where the jsonb
+#     pushJsonbValue/JsonbInState change bites.
+#   * ubuntu-24.04 is pinned.  Upstream uses ubuntu-latest together with
+#     libstdc++-12-dev; when the runner image rolls forward that GCC-12-pinned
+#     package disappears and the build breaks for no visible reason.
+#   * fail-fast is off, there is a timeout, and the token is read-only.
+#   * Extra gates beyond installcheck: the low-memory suite, the cancellation
+#     regression, a fixed-seed fuzz run, and a -Werror=clobbered build.  Those
+#     protect the specific failure classes this patch series is about
+#     (JS-heap leaks, signal-handler hijack, PG_TRY/PG_CATCH volatile
+#     correctness).
+#
+# NB: deps/ is deliberately never cached.  pljs's Makefile applies
+# patches/01-shared-lib-build and 02-unicode-conflict to quickjs
+# non-idempotently, so a warm deps/ tree fails with "Reversed (or previously
+# applied) patch".  Only the built PostgreSQL tree is cached.
+#
+# NB: submodules are deliberately NOT checked out recursively.  pljs's Makefile
+# must be the thing that initialises and patches quickjs (its recipe is guarded
+# on deps/quickjs/quickjs.h not existing); pre-checking it out skips the -fPIC
+# patch, which links on macOS but fails with R_X86_64_32S on Linux.
+name: Snowflake pljs CI
+
+on:
+  push:
+    branches: [main, 'pljs-pr/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [REL_16_STABLE, REL_17_STABLE, REL_18_STABLE, REL_19_STABLE]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential libreadline-dev zlib1g-dev \
+            flex bison libxml2-dev libxslt-dev libssl-dev libxml2-utils \
+            xsltproc pkg-config libglib2.0-dev cmake python3
+
+      - name: Cache the built PostgreSQL tree
+        id: pgcache
+        uses: actions/cache@v4
+        with:
+          path: postgres/inst
+          key: pg-${{ matrix.version }}-ubuntu-24.04-v1
+
+      - name: Build PostgreSQL ${{ matrix.version }}
+        if: steps.pgcache.outputs.cache-hit != 'true'
+        run: |
+          git clone --branch ${{ matrix.version }} --single-branch --depth 1 \
+            https://github.com/postgres/postgres.git
+          cd postgres
+          ./configure --prefix=$PWD/inst/ --enable-cassert --enable-debug --with-openssl
+          make -j"$(nproc)" install
+          # ltree is load-bearing: sql/types.sql references it, so the `types`
+          # regression test fails without it.
+          make -C contrib/ltree install
+
+      - name: Start PostgreSQL
+        run: |
+          export PATH="$PWD/postgres/inst/bin:$PATH"
+          initdb -D "$PWD/pgdata"
+          pg_ctl -D "$PWD/pgdata" -l "$PWD/pgdata/logfile" start
+          # give the postmaster a moment, then prove it answers
+          for _ in $(seq 1 30); do pg_isready -q && break; sleep 1; done
+          pg_isready
+
+      - name: Check out pljs
+        uses: actions/checkout@v4
+        with:
+          path: pljs
+          # NOT recursive -- see the note at the top of this file.
+
+      - name: Build and install pljs
+        run: |
+          make -C pljs PG_CONFIG="$PWD/postgres/inst/bin/pg_config" \
+            deps/quickjs/libquickjs.a
+          make -C pljs PG_CONFIG="$PWD/postgres/inst/bin/pg_config" -j"$(nproc)"
+          make -C pljs PG_CONFIG="$PWD/postgres/inst/bin/pg_config" install
+
+      - name: Regression suite
+        id: installcheck
+        run: |
+          make -C pljs PG_CONFIG="$PWD/postgres/inst/bin/pg_config" installcheck
+
+      - name: Regression suite under a 64MB JS heap cap
+        id: lowmem
+        run: |
+          PGOPTIONS="-c pljs.memory_limit=64" \
+            make -C pljs PG_CONFIG="$PWD/postgres/inst/bin/pg_config" installcheck
+
+      - name: Query cancellation regression
+        if: hashFiles('pljs/tools/pljs-cancel-checks.sh') != ''
+        env:
+          CANCEL_TIMEOUT: 30
+        run: |
+          export PATH="$PWD/postgres/inst/bin:$PATH"
+          PGDATABASE=postgres pljs/tools/pljs-cancel-checks.sh
+
+      - name: Conversion fuzz (fixed seed, deterministic)
+        if: hashFiles('pljs/tools/pljs-fuzz.py') != ''
+        run: |
+          export PATH="$PWD/postgres/inst/bin:$PATH"
+          PGDATABASE=postgres python3 pljs/tools/pljs-fuzz.py --seed 1 --iterations 200
+
+      - name: Build with -Werror=clobbered (guards PG_TRY/PG_CATCH volatile use)
+        run: |
+          make -C pljs PG_CONFIG="$PWD/postgres/inst/bin/pg_config" clean
+          make -C pljs PG_CONFIG="$PWD/postgres/inst/bin/pg_config" \
+            CC=gcc COPT="-Werror=clobbered" -j"$(nproc)"
+
+      - name: Show regression diffs on failure
+        if: failure()
+        run: |
+          cat pljs/regression.diffs || true
+
+      - name: Upload regression output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-${{ matrix.version }}
+          path: |
+            pljs/regression.diffs
+            pljs/regression.out
+            pljs/results
+          if-no-files-found: ignore

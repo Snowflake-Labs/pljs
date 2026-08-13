@@ -6,6 +6,11 @@ on:
 jobs:
   release:
     name: Release on PGXN
+    # Only plv8/pljs publishes pljs to PGXN.  On a fork this job would attempt a
+    # real release from our tag and fail for want of PGXN credentials, so gate it
+    # on the repository rather than deleting the file (keeping the diff against
+    # upstream minimal).
+    if: github.repository == 'plv8/pljs'
     runs-on: ubuntu-latest
     container: pgxn/pgxn-tools
     steps:
