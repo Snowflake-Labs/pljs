@@ -367,6 +367,7 @@ static int pljs_execute_params(const char *sql, JSValue params,
 
     values[i] = pljs_jsvalue_to_datum(parstate.param_types[i], param, &is_null,
                                       ctx, NULL);
+    nulls[i] = is_null ? 'n' : ' ';
 
     JS_FreeValue(ctx, param);
   }

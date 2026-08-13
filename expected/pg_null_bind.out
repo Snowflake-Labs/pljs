@@ -1,0 +1,16 @@
+-- Regression test for the NULL-fcinfo deref on NULL bind parameters.
+--
+-- pljs_execute_params() converts binds with pljs_jsvalue_to_datum(fcinfo=NULL).
+-- The null-value handler set *is_null but then also called PG_RETURN_NULL(),
+-- which expands to "fcinfo->isnull = true; return ..." and dereferences the
+-- NULL fcinfo -> SIGSEGV for ANY NULL bind parameter (this crashed every error
+-- path in the CDC apply procedure that logged a NULL operation_id). The fix
+-- returns (Datum) 0 directly in the fcinfo=NULL branch. Binding SQL NULL to
+-- by-value types must now yield JS null without crashing.
+DO $$
+  const a = pljs.execute('SELECT $1::int8 AS v', [null])[0].v;
+  const b = pljs.execute('SELECT $1::int4 AS v', [null])[0].v;
+  const c = pljs.execute('SELECT $1::bool AS v', [null])[0].v;
+  pljs.elog(NOTICE, 'null int8/int4/bool -> ' + (a === null) + ' ' + (b === null) + ' ' + (c === null));
+$$ LANGUAGE pljs;
+NOTICE:  null int8/int4/bool -> true true true
