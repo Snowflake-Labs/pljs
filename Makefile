@@ -61,7 +61,8 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_integer_overflow pg_return_next_null_row \
 	pg_bool_string_parse pg_jsonb_undefined_element \
 	pg_bytea_bytes pg_column_name_mismatch \
-	pg_jsonb_array_return
+	pg_jsonb_array_return \
+	pg_record_column_leak
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 
