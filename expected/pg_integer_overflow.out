@@ -125,3 +125,81 @@ DROP FUNCTION ior_i4_over, ior_i4_under, ior_i2_over, ior_i8_over, ior_big_i4,
   ior_big_i8, ior_big_i2, ior_nan, ior_inf, ior_ninf, ior_i2_min, ior_i2_max,
   ior_i4_min, ior_i4_max, ior_i8_min, ior_i8_max, ior_p53, ior_frac_pos,
   ior_frac_neg, ior_frac_edge, ior_null;
+-- 8) A plain Number reaching int8 is exact only up to 2^53, so an in-range but
+-- inexact value is rejected rather than silently altered.  Note the rounding
+-- itself happens in JavaScript, before pljs sees the value: the literal
+-- 9007199254740993 *is* 9007199254740992 by the time it arrives, which is why
+-- the check is on magnitude rather than on a comparison with the original.
+CREATE FUNCTION ior_i8_num(v float8) RETURNS bigint LANGUAGE pljs AS $$ return v; $$;
+-- Exactly 2^53 is representable and accepted.
+SELECT ior_i8_num(9007199254740992) AS at_2_53;
+     at_2_53      
+------------------
+ 9007199254740992
+(1 row)
+
+-- Past it, in range but not exactly representable: rejected with a hint.
+SELECT ior_i8_num(9007199254740994);
+ERROR:  value cannot be represented exactly as type bigint
+DETAIL:  JavaScript numbers are IEEE-754 doubles and are exact only up to 2^53.
+HINT:  Use a BigInt literal (e.g. 9007199254740993n) or a string.
+SELECT ior_i8_num(1e17);
+ERROR:  value cannot be represented exactly as type bigint
+DETAIL:  JavaScript numbers are IEEE-754 doubles and are exact only up to 2^53.
+HINT:  Use a BigInt literal (e.g. 9007199254740993n) or a string.
+SELECT ior_i8_num(-1e17);
+ERROR:  value cannot be represented exactly as type bigint
+DETAIL:  JavaScript numbers are IEEE-754 doubles and are exact only up to 2^53.
+HINT:  Use a BigInt literal (e.g. 9007199254740993n) or a string.
+-- Beyond int64 entirely still reports the range, which is the more useful
+-- message and what the bind path's callers match on.
+SELECT ior_i8_num(1e30);
+ERROR:  value is out of range for type bigint
+-- BigInt and string remain the exact routes.
+CREATE FUNCTION ior_i8_exact() RETURNS bigint LANGUAGE pljs AS $$ return 100000000000000001n; $$;
+CREATE FUNCTION ior_i8_str() RETURNS bigint LANGUAGE pljs AS $$ return '100000000000000001'; $$;
+SELECT ior_i8_exact() AS bigint_route;
+    bigint_route    
+--------------------
+ 100000000000000001
+(1 row)
+
+SELECT ior_i8_str() AS string_route;
+    string_route    
+--------------------
+ 100000000000000001
+(1 row)
+
+-- 9) float4 is narrower than the double we read, so a finite value too large to
+-- represent raised nothing and silently became +-Infinity, where PostgreSQL's
+-- own float8::float4 cast reports an overflow.
+CREATE FUNCTION ior_f4(v float8) RETURNS real LANGUAGE pljs AS $$ return v; $$;
+SELECT ior_f4(1e30) AS f4_in_range;
+ f4_in_range 
+-------------
+       1e+30
+(1 row)
+
+SELECT ior_f4(1e300);
+ERROR:  value out of range: overflow
+DETAIL:  Value 1e+300 cannot be represented as type real.
+SELECT ior_f4(-1e300);
+ERROR:  value out of range: overflow
+DETAIL:  Value -1e+300 cannot be represented as type real.
+-- NaN and the infinities are representable in float4 and pass through.
+SELECT ior_f4('NaN'::float8) AS f4_nan;
+ f4_nan 
+--------
+    NaN
+(1 row)
+
+SELECT ior_f4('Infinity'::float8) AS f4_infinity;
+ f4_infinity 
+-------------
+    Infinity
+(1 row)
+
+DROP FUNCTION ior_i8_num(float8);
+DROP FUNCTION ior_i8_exact();
+DROP FUNCTION ior_i8_str();
+DROP FUNCTION ior_f4(float8);

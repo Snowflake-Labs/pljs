@@ -1426,6 +1426,35 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
       v = pljs_bigint_to_int64_checked(ctx, val, INT8OID);
     } else {
       /*
+       * A plain Number reaches int8 through a double, which represents integers
+       * exactly only up to 2^53.  Range-checking alone therefore still accepted
+       * values it then silently altered.  Reject anything in range but beyond
+       * exact representation, and point at the two ways to express it exactly.
+       *
+       * The range check runs first: a value beyond int64 entirely is better
+       * described as out of range than as inexact, and that is also what the
+       * bind path's callers match on.
+       */
+      double d;
+
+      if (JS_ToFloat64(ctx, &d, val) < 0) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                        errmsg("could not convert JavaScript value to a "
+                               "number")));
+      }
+
+      if (!isnan(d) && !isinf(d) && d >= (double)PG_INT64_MIN &&
+          d < -(double)PG_INT64_MIN && fabs(d) > 9007199254740992.0) {
+        ereport(ERROR,
+                (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                 errmsg("value cannot be represented exactly as type bigint"),
+                 errdetail("JavaScript numbers are IEEE-754 doubles and are "
+                           "exact only up to 2^53."),
+                 errhint("Use a BigInt literal (e.g. 9007199254740993n) or a "
+                         "string.")));
+      }
+
+      /*
        * -(double) PG_INT64_MIN is exactly 2^63, one past INT64_MAX, and is the
        * correct exclusive bound: (double) PG_INT64_MAX rounds up to the same
        * value, so comparing against it would accept 2^63 itself.
@@ -1440,7 +1469,29 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
 
   case FLOAT4OID: {
     double in;
-    JS_ToFloat64(ctx, &in, val);
+
+    if (JS_IsString(val)) {
+      return pljs_string_to_datum_via_input(FLOAT4OID, val, ctx);
+    }
+
+    if (JS_ToFloat64(ctx, &in, val) < 0) {
+      ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                      errmsg("could not convert JavaScript value to a number")));
+    }
+
+    /*
+     * float4 is narrower than the double we just read, so an out-of-range value
+     * silently became +-Infinity where PostgreSQL's own float8::float4 cast
+     * raises "value out of range: overflow".  NaN and the infinities are
+     * representable in float4 and pass through unchanged; only a finite double
+     * too large to represent is rejected.
+     */
+    if (!isnan(in) && !isinf(in) && isinf((float4)in)) {
+      ereport(ERROR, (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                      errmsg("value out of range: overflow"),
+                      errdetail("Value %g cannot be represented as type real.",
+                                in)));
+    }
 
     PG_RETURN_FLOAT4((float4)in);
     break;
