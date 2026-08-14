@@ -1669,9 +1669,14 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
       JS_FreeValue(ctx, exc);
       JS_FreeValue(ctx, js);
 
+      if (detail) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                        errmsg("could not convert JavaScript value to json"),
+                        errdetail("%s", detail)));
+      }
+
       ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-                      errmsg("could not convert JavaScript value to json"),
-                      detail ? errdetail("%s", detail) : 0));
+                      errmsg("could not convert JavaScript value to json")));
     }
 
     // return it as a text datum of the exact stringified length.
@@ -2483,7 +2488,7 @@ static JsonbValue *jsonb_array_from_array(JSValue array,
      */
     if (Is_Date(elem)) {
       value = jsonb_from_value(elem, pstate, WJB_ELEM, ctx, NULL);
-    } else if (JS_IsUndefined(elem)) {
+    } else if (JS_IsUndefined(elem) || JS_IsFunction(ctx, elem)) {
       /*
        * An undefined *element* is JSON null, not an omitted element.  Skipping
        * it shortened the array and shifted every later index:
@@ -2494,11 +2499,12 @@ static JsonbValue *jsonb_array_from_array(JSValue array,
        * Note this differs from an undefined object *value*, which JSON drops
        * along with its key (`{a: undefined}` is `{}`); that behaviour is
        * correct and unchanged, and is handled by jsonb_from_value().
+       *
+       * A function element is also JSON null, for the same reason
+       * JSON.stringify() renders it that way -- and the two branches pushed
+       * an identical jbvNull, so they are merged rather than left as two
+       * copies for the next person to update only one of.
        */
-      JsonbValue null_val = {.type = jbvNull};
-
-      value = jsonb_push(pstate, WJB_ELEM, &null_val);
-    } else if (JS_IsFunction(ctx, elem)) {
       JsonbValue null_val = {.type = jbvNull};
 
       value = jsonb_push(pstate, WJB_ELEM, &null_val);

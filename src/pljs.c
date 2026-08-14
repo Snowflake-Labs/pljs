@@ -182,6 +182,14 @@ void pljs_guc_init(void) {
  * Preserving the message here is what lets a coded error (e.g. the "[CODE] "
  * prefix embedded by the mirror procedures) survive across a nested
  * pljs.execute()/SPI boundary.
+ *
+ * OWNERSHIP: all three returned strings -- the return value, *message_out and
+ * *detail_out -- are palloc'd in CurrentMemoryContext.  The caller must therefore
+ * be in a context that outlives the JavaScript context teardown it is about to
+ * perform; call_function() switches back to the caller's context before calling
+ * this for exactly that reason.  Adding the two out-parameters silently turned
+ * one palloc'd string into three, so this is worth stating rather than
+ * rediscovering.
  */
 static char *dump_error(JSContext *ctx, char **message_out, char **detail_out) {
   JSValue exception_val, val;
@@ -335,6 +343,36 @@ static int interrupt_handler(JSRuntime *rt, void *opaque) {
   return (QueryCancelPending || ProcDiePending) ? 1 : 0;
 }
 
+/*
+ * Resolve an argument's type for conversion.
+ *
+ * Prefers the type *this call* resolved to, falling back to the declared type
+ * when no call expression is available (a validator, or a call with no
+ * expression tree).  For a non-polymorphic argument the two are equal, so this
+ * is only observable for a polymorphic declaration -- where the declared type is
+ * a pseudo-type that cannot be converted at all.
+ *
+ * This file previously overrode the declared type only
+ * `if (fcinfo && IsPolymorphicType(argtype))`, at three separate sites, while
+ * pljs_window_argtype() in functions.c preferred the resolved type
+ * unconditionally: one question answered by two different rules in the same
+ * extension.  Unified on the unconditional form, which is correct in both
+ * places -- get_call_expr_argtype() handles WindowFunc, so it resolves for
+ * window calls too.
+ */
+static Oid pljs_resolve_argtype(FunctionCallInfo fcinfo, Oid argtype,
+                                int argno) {
+  if (fcinfo != NULL && fcinfo->flinfo != NULL) {
+    Oid resolved = get_fn_expr_argtype(fcinfo->flinfo, argno);
+
+    if (OidIsValid(resolved)) {
+      return resolved;
+    }
+  }
+
+  return argtype;
+}
+
 /**
  * @brief Set up the pljs_context.
  *
@@ -412,10 +450,7 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
       context->arguments[i] = NULL;
     }
 
-    /* Resolve polymorphic types, if this is an actual call context. */
-    if (fcinfo && IsPolymorphicType(argtype)) {
-      argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
-    }
+    argtype = pljs_resolve_argtype(fcinfo, argtype, i);
 
     pljs_function->argtypes[i] = argtype;
     pljs_function->argmodes[i] = argmode;
@@ -599,9 +634,7 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
        * integer; results only looked correct because the same wrong encoding
        * was used to convert the value back out.
        */
-      if (fcinfo && IsPolymorphicType(argtype)) {
-        argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
-      }
+      argtype = pljs_resolve_argtype(fcinfo, argtype, i);
 
       // Window functions: expand_composite=false (skip composite expansion)
       argv[i] =
@@ -621,10 +654,7 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
         continue;
       }
 
-      /* Resolve polymorphic types, if this is an actual call context. */
-      if (fcinfo && IsPolymorphicType(argtype)) {
-        argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
-      }
+      argtype = pljs_resolve_argtype(fcinfo, argtype, i);
       bool is_null = (fcinfo->args[inargs].isnull == 1);
       // Regular functions: expand_composite=true (expand composite types)
       argv[inargs] = pljs_datum_to_jsvalue(argtype, fcinfo->args[inargs].value,
