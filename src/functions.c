@@ -1622,9 +1622,22 @@ static JSValue pljs_return_next_internal(JSContext *ctx, JSValueConst this_val, 
 
           /*
            * A single-column RETURNS TABLE collapses to a scalar return type in
-           * the catalog, so the descriptor frequently carries no column name at
-           * all.  A row object with exactly one property is unambiguous either
-           * way, so accept it.
+           * the catalog, so the descriptor carries no column name at all -- not
+           * merely "frequently": measured on PostgreSQL 17, even the exactly
+           * matching key fails to resolve by name for RETURNS TABLE(col int),
+           * because there is no name to compare against.  The name-matching pass
+           * above is therefore unreachable for this shape and resolution is
+           * necessarily by arity.
+           *
+           * That is the honest explanation of an asymmetry worth knowing about:
+           * a one-property object is accepted whatever its key is called, so
+           * {typo: 1} silently supplies the column, while a two-property object
+           * cannot be resolved at all and raises.  It is not a case-sensitivity
+           * problem -- adding a case-insensitive match changes nothing here,
+           * since no name reaches this code -- and it cannot be tightened
+           * without a name to validate against.  Callers who want the typo
+           * caught should declare the set with two or more columns, or return the
+           * bare value rather than a row object.
            */
           if (!resolved && nprops == 1) {
             JS_FreeValue(ctx, value);
