@@ -16,6 +16,16 @@
 -- key count); they must now complete.  Objects are deliberately given many keys
 -- so the pre-fix leak dwarfs the cap with a wide, platform-independent margin
 -- while the iteration counts stay small and fast.
+--
+-- Instrument, and why this one is not measured with pg_backend_memory_contexts:
+-- the leak is on the QuickJS heap, which that view cannot see at all, so a test
+-- built on it would pass whether or not the leak is fixed.  pljs.memory_limit is
+-- the only SQL-visible instrument that counts QuickJS allocations.
+--
+-- Verified to discriminate rather than assumed: with the two property-table
+-- release sites disabled in src/types.c, this file fails; with them in place it
+-- passes.  The 64MB cap is the GUC's minimum, so the margin cannot be widened by
+-- lowering it -- the objects' key counts are the lever instead.
 CREATE EXTENSION IF NOT EXISTS pljs;
 NOTICE:  extension "pljs" already exists, skipping
 SET pljs.memory_limit = 64;
