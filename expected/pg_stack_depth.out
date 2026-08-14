@@ -8,6 +8,26 @@
 -- (half of max_stack_depth, floored) in _PG_init, so pure-JS recursion trips
 -- QuickJS's guard well before PostgreSQL's own C-stack limit and the kernel
 -- stack limit are reached.
+--
+-- WHAT THIS FILE DOES AND DOES NOT DEMONSTRATE.  The review asked whether this
+-- test lowers max_stack_depth, "or otherwise makes the bound observable --
+-- otherwise the test passes either way and this commit has no regression
+-- coverage".  It does not, and it cannot: the JS budget is derived from
+-- max_stack_depth once, in _PG_init, so a SET here has no effect on the live
+-- runtime.  (That is the same read-once behaviour the review notes separately as
+-- an asymmetry with the pljs.memory_limit assign hook; the two observations
+-- interact.)
+--
+-- At the 2048kB default the derived budget is 1MB, which is what
+-- JS_DEFAULT_STACK_SIZE already is, so on default settings this file would pass
+-- with or without the explicit JS_SetMaxStackSize() call.  What it does assert is
+-- still worth having: that deep recursion raises a catchable error rather than
+-- crashing the backend, in pure JS and across mutual JS<->SQL recursion.
+--
+-- Making the bound itself observable needs the backend started with a different
+-- max_stack_depth -- PGOPTIONS='-c max_stack_depth=1024kB' -- which pg_regress
+-- cannot express per file.  tools/pljs-memory-matrix.sh already starts a backend
+-- with PGOPTIONS and is the place for it.
 CREATE EXTENSION IF NOT EXISTS pljs;
 NOTICE:  extension "pljs" already exists, skipping
 -- Unbounded self-recursion in an anonymous block.  Use terse verbosity: the

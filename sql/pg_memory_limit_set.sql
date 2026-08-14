@@ -33,3 +33,32 @@ SELECT alloc_mb(200) AS at_512_cap;
 
 RESET pljs.memory_limit;
 DROP FUNCTION alloc_mb(int);
+
+-- The assign hook also fires when a SET is rolled back, re-applying the previous
+-- value.  If it did not, the GUC would read as restored while the live runtime
+-- kept the transaction's tighter limit -- and nothing SQL-visible would say so.
+--
+-- Asserted by allocating more than the transaction's limit but less than the
+-- restored one: that only succeeds if the runtime really went back.
+CREATE FUNCTION mls_alloc(mb int) RETURNS bool LANGUAGE pljs AS $$
+  const buf = new ArrayBuffer(mb * 1024 * 1024);
+  return buf.byteLength === mb * 1024 * 1024;
+$$;
+
+SET pljs.memory_limit = 512;
+SELECT mls_alloc(100) AS alloc_100mb_under_512;
+
+BEGIN;
+SET pljs.memory_limit = 64;
+-- Too large for the 64MB cap now in force.
+SELECT mls_alloc(100) AS alloc_100mb_under_64;
+ROLLBACK;
+
+-- The GUC is back...
+SHOW pljs.memory_limit;
+
+-- ... and so is the runtime: the same allocation succeeds again.
+SELECT mls_alloc(100) AS alloc_100mb_after_rollback;
+
+DROP FUNCTION mls_alloc(int);
+
