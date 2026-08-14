@@ -615,25 +615,59 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
      * compatible, not less).  The JS -> bytea direction already accepts typed
      * arrays, so the value round-trips.
      */
-    void *p = PG_DETOAST_DATUM_COPY(arg);
+    struct varlena *p = (struct varlena *)PG_DETOAST_DATUM_PACKED(arg);
     size_t len = VARSIZE_ANY_EXHDR(p);
     JSValue buffer =
         JS_NewArrayBufferCopy(ctx, (const uint8_t *)VARDATA_ANY(p), len);
-    JSValueConst ta_args[1] = {buffer};
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue ctor = JS_GetPropertyStr(ctx, global, "Uint8Array");
+
+    if (JS_IsException(buffer)) {
+      if (p != (struct varlena *)DatumGetPointer(arg)) {
+        pfree(p);
+      }
+      return buffer;
+    }
 
     /*
-     * Go through the real Uint8Array constructor rather than
-     * JS_NewTypedArray(): the latter passes JS_UNDEFINED as new_target, which
-     * builds a view of length 0 over the buffer instead of one spanning it.
+     * Build the view with JS_NewTypedArray() rather than by fetching
+     * `Uint8Array` off the global object and calling it.
+     *
+     * Contexts are cached per user id and reused for the whole session, so
+     * reading the constructor from the global meant any function that did
+     * `globalThis.Uint8Array = f` -- or a pljs.start_proc that did it once --
+     * permanently redirected every later bytea conversion in that session
+     * through arbitrary user code, inside the argument-marshalling path.
+     * JS_NewTypedArray() goes straight to the intrinsic constructor, so there
+     * is nothing for user code to intercept.
+     *
+     * NB: js_typed_array_constructor() reads argv[1] (byteOffset) and argv[2]
+     * (length) *unconditionally*, without consulting argc.  Passing a
+     * one-element argv therefore reads two elements past the array, and
+     * whatever happens to be on the stack becomes the offset and length -- which
+     * is why an earlier attempt at this produced a zero-length view and was
+     * abandoned in favour of the global lookup.  Pass all three explicitly.
      */
-    return_result = JS_CallConstructor(ctx, ctor, 1, ta_args);
+    JSValueConst ta_args[3] = {buffer, JS_UNDEFINED, JS_UNDEFINED};
 
-    JS_FreeValue(ctx, ctor);
-    JS_FreeValue(ctx, global);
+    return_result = JS_NewTypedArray(ctx, 3, ta_args, JS_TYPED_ARRAY_UINT8);
+
     JS_FreeValue(ctx, buffer);
-    pfree(p);
+
+    /*
+     * A large bytea can exhaust pljs.memory_limit here.  The result was
+     * previously handed back unchecked, so the exception JSValue was stored into
+     * argv[] and passed to JS_Call() as if it were a value.
+     */
+    if (JS_IsException(return_result)) {
+      if (p != (struct varlena *)DatumGetPointer(arg)) {
+        pfree(p);
+      }
+      return return_result;
+    }
+
+    /* PG_DETOAST_DATUM_PACKED only allocates when it actually had to detoast. */
+    if (p != (struct varlena *)DatumGetPointer(arg)) {
+      pfree(p);
+    }
     break;
   }
 

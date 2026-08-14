@@ -1,0 +1,59 @@
+-- Regression: bytea conversion resolved `Uint8Array` off the global object, so
+-- user code could hijack the argument-marshalling path for the whole session.
+--
+-- JSContexts are cached per user id and reused for the life of the session, so a
+-- single `globalThis.Uint8Array = f` -- in any function, or once in a
+-- pljs.start_proc -- permanently redirected every later bytea conversion through
+-- that function.  That is arbitrary user code running inside argument
+-- marshalling, for every bytea in the session, in whatever function happens to
+-- run next.
+--
+-- The view is now built with JS_NewTypedArray(), which goes straight to the
+-- intrinsic constructor, so there is nothing on the global for user code to
+-- intercept.
+CREATE FUNCTION shadow_uint8array() RETURNS void AS $$
+  globalThis.Uint8Array = function () { throw new Error('hijacked'); };
+$$ LANGUAGE pljs;
+
+-- Echoes the incoming view straight back, deliberately WITHOUT calling
+-- `new Uint8Array` itself: this must exercise pljs's marshalling in both
+-- directions, not the user-visible global.
+CREATE FUNCTION bytea_roundtrip(v bytea) RETURNS bytea AS $$
+  return v;
+$$ LANGUAGE pljs;
+
+CREATE FUNCTION bytea_length(v bytea) RETURNS int AS $$
+  return v.length;
+$$ LANGUAGE pljs;
+
+-- Works before the shadowing, obviously.
+SELECT bytea_length('\xdeadbeef'::bytea) AS len_before;
+
+-- Poison the global.  This runs in the cached context every later call shares.
+SELECT shadow_uint8array();
+
+-- The conversion must be unaffected: 4 bytes, exact round-trip.
+SELECT bytea_length('\xdeadbeef'::bytea) AS len_after_shadowing;
+SELECT encode(bytea_roundtrip('\xdeadbeef'::bytea), 'hex') AS roundtrip_after_shadowing;
+
+-- Non-UTF8 bytes specifically, since that is what the Uint8Array change was for.
+SELECT encode(bytea_roundtrip('\xff00fe01'::bytea), 'hex') AS non_utf8_after_shadowing;
+
+-- An empty bytea still yields a zero-length view rather than a garbage length,
+-- which is what a one-element argv used to produce.
+SELECT bytea_length(''::bytea) AS empty_len;
+
+-- And a bytea large enough to have been TOASTed, exercising the detoast path.
+SELECT bytea_length(decode(repeat('ab', 20000), 'hex')) AS big_len;
+
+-- For completeness: user code that calls `new Uint8Array` itself still gets
+-- whatever the global says, which is the caller's own doing and not something
+-- pljs should override.  Only pljs's own marshalling is protected.
+CREATE FUNCTION user_constructs_one() RETURNS text AS $$
+  try { new Uint8Array(1); return 'constructed'; }
+  catch (e) { return 'user-visible global still hijacked: ' + e.message; }
+$$ LANGUAGE pljs;
+
+SELECT user_constructs_one() AS user_side_global;
+
+DROP FUNCTION shadow_uint8array, bytea_roundtrip, bytea_length, user_constructs_one;
