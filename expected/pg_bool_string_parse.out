@@ -113,3 +113,38 @@ $$ LANGUAGE pljs;
 NOTICE:  bind null bool -> true
 DROP FUNCTION bsp_false_str, bsp_true_str, bsp_f_str, bsp_col, bsp_bad,
   bsp_empty, bsp_true, bsp_false, bsp_zero, bsp_one, bsp_obj, bsp_null;
+-- An object-wrapped primitive is not JS_IsString(), so `new String("false")`
+-- skipped the string branch and fell through to JS_ToBool(), which reports every
+-- object as true -- reintroducing the exact inversion this case exists to
+-- prevent.  String objects are now unwrapped and take the boolin path.
+CREATE FUNCTION bsp_obj(v text) RETURNS bool LANGUAGE pljs AS $$ return new String(v); $$;
+SELECT bsp_obj('false') AS obj_false, bsp_obj('f') AS obj_f, bsp_obj('no') AS obj_no,
+       bsp_obj('0') AS obj_zero;
+ obj_false | obj_f | obj_no | obj_zero 
+-----------+-------+--------+----------
+ f         | f     | f      | f
+(1 row)
+
+SELECT bsp_obj('true') AS obj_true, bsp_obj('yes') AS obj_yes, bsp_obj('on') AS obj_on;
+ obj_true | obj_yes | obj_on 
+----------+---------+--------
+ t        | t       | t
+(1 row)
+
+-- ... and an unparseable one raises, exactly as the bare string does.
+SELECT bsp_obj('maybe');
+ERROR:  invalid input syntax for type boolean: "maybe"
+-- Only String objects are unwrapped.  A plain object keeps JavaScript's own
+-- truthiness, which is at least the documented behaviour for it; unwrapping
+-- everything would turn {} into the text "[object Object]" and raise from boolin.
+CREATE FUNCTION bsp_plain() RETURNS bool LANGUAGE pljs AS $$ return {}; $$;
+CREATE FUNCTION bsp_array() RETURNS bool LANGUAGE pljs AS $$ return []; $$;
+SELECT bsp_plain() AS plain_object, bsp_array() AS empty_array;
+ plain_object | empty_array 
+--------------+-------------
+ t            | t
+(1 row)
+
+DROP FUNCTION bsp_obj(text);
+DROP FUNCTION bsp_plain();
+DROP FUNCTION bsp_array();

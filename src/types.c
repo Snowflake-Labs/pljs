@@ -38,6 +38,7 @@
 
 // Helper functions that should really exist as part of quickjs.
 static JSClassID JS_CLASS_OBJECT = 1;
+static JSClassID JS_CLASS_STRING = 5;
 static JSClassID JS_CLASS_DATE = 10;
 static JSClassID JS_CLASS_ARRAY_BUFFER = 19;
 static JSClassID JS_CLASS_SHARED_ARRAY_BUFFER = 20;
@@ -1392,6 +1393,31 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
      */
     if (JS_IsString(val)) {
       return pljs_string_to_datum_via_input(BOOLOID, val, ctx);
+    }
+
+    /*
+     * An object-wrapped primitive is not JS_IsString(), so `new String("false")`
+     * skipped the branch above and fell through to JS_ToBool() -- which reports
+     * every object as true, reintroducing exactly the inversion this case exists
+     * to prevent.  Unwrap it and take the string path.
+     *
+     * Only String objects are unwrapped: a general JS_ToString() here would also
+     * stringify arbitrary objects and arrays, so `{}` would become the text
+     * "[object Object]" and then raise from boolin, where JS_ToBool()'s
+     * truthiness is at least the documented JavaScript behaviour for those.
+     */
+    if (JS_IsObject(val) && JS_GetClassID(val) == JS_CLASS_STRING) {
+      JSValue unwrapped = JS_ToString(ctx, val);
+
+      if (JS_IsException(unwrapped)) {
+        return (Datum)0;
+      }
+
+      Datum d = pljs_string_to_datum_via_input(BOOLOID, unwrapped, ctx);
+
+      JS_FreeValue(ctx, unwrapped);
+
+      return d;
     }
 
     int8_t in = JS_ToBool(ctx, val);
