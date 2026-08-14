@@ -66,9 +66,9 @@ CREATE FUNCTION bind_bytea_bad() RETURNS text LANGUAGE pljs AS $$
   catch (e) { return "err:" + e.message; }
 $$;
 SELECT bind_bytea_bad();
-                                        bind_bytea_bad                                        
-----------------------------------------------------------------------------------------------
- err:cannot convert JavaScript value to bytea: expected a string, ArrayBuffer, or typed array
+                bind_bytea_bad                
+----------------------------------------------
+ err:cannot convert JavaScript value to bytea
 (1 row)
 
 -- ... but a string still binds to bytea just fine.

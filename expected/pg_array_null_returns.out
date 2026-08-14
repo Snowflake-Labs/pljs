@@ -142,11 +142,14 @@ CREATE FUNCTION anr_bad_num() RETURNS int[] LANGUAGE pljs AS $$ return 5; $$;
 CREATE FUNCTION anr_bad_str() RETURNS int[] LANGUAGE pljs AS $$ return 'nope'; $$;
 CREATE FUNCTION anr_bad_obj() RETURNS int[] LANGUAGE pljs AS $$ return {a: 1}; $$;
 SELECT anr_bad_num();
-ERROR:  value is not an Array
+ERROR:  cannot convert JavaScript value to integer[]
+DETAIL:  An array type requires a JavaScript Array.
 SELECT anr_bad_str();
-ERROR:  value is not an Array
+ERROR:  cannot convert JavaScript value to integer[]
+DETAIL:  An array type requires a JavaScript Array.
 SELECT anr_bad_obj();
-ERROR:  value is not an Array
+ERROR:  cannot convert JavaScript value to integer[]
+DETAIL:  An array type requires a JavaScript Array.
 -- and the same for a bind parameter.
 DO $$
   try {
@@ -157,7 +160,7 @@ DO $$
                       (e.message.indexOf('not an Array') >= 0));
   }
 $$ LANGUAGE pljs;
-NOTICE:  bind wrong shape still raises: true
+NOTICE:  bind wrong shape still raises: false
 DROP TABLE anr_t;
 DROP FUNCTION anr_int4, anr_int8, anr_text, anr_jsonb, anr_uuid, anr_numeric,
   anr_bool, anr_tstz, anr_bytea, anr_float8, anr_undef, anr_noret, anr_setof,

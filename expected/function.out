@@ -47,7 +47,8 @@ $$
     return 1;
 $$ LANGUAGE pljs;
 SELECT bogus_return_type();
-ERROR:  value is not an Array
+ERROR:  cannot convert JavaScript value to integer[]
+DETAIL:  An array type requires a JavaScript Array.
 -- INOUT and OUT parameters
 CREATE FUNCTION one_inout(a integer, INOUT b text) AS
 $$

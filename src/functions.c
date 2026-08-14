@@ -561,8 +561,10 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
   }
 
   if (argcount != nparams) {
-    elog(ERROR, "plan expected %d arguments but %d were passed instead",
-         argcount, nparams);
+    ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("plan expected %d arguments but %d were passed instead",
+                    argcount, nparams)));
   }
 
   if (nparams > 0) {
@@ -923,8 +925,10 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
   }
 
   if (argcount != nparams) {
-    elog(ERROR, "plan expected %d arguments but %d were passed instead",
-         argcount, nparams);
+    ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("plan expected %d arguments but %d were passed instead",
+                    argcount, nparams)));
   }
 
   if (nparams > 0) {

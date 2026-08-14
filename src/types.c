@@ -1070,7 +1070,8 @@ static Datum pljs_jsvalue_to_datum_fallback(JSValue value, bool *is_null,
   str = JS_ToCStringLen(ctx, &plen, value);
 
   if (str == NULL) {
-    elog(ERROR, "could not convert JavaScript value to a string");
+    ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                    errmsg("could not convert JavaScript value to a string")));
   }
 
   if (memchr(str, '\0', plen) != NULL) {
@@ -1124,7 +1125,8 @@ static Datum pljs_string_to_datum_via_input(Oid typid, JSValueConst val,
   Datum ret;
 
   if (str == NULL) {
-    elog(ERROR, "could not convert JavaScript value to a string");
+    ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                    errmsg("could not convert JavaScript value to a string")));
   }
 
   if (memchr(str, '\0', plen) != NULL) {
@@ -1325,7 +1327,16 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
   }
 
   if (type.category == TYPCATEGORY_ARRAY && !JS_IsArray(ctx, val)) {
-    elog(ERROR, "value is not an Array");
+    /*
+     * A user handing a non-array to an array-typed column is a data-type
+     * mistake, not an internal fault, so it must not report XX000: a client
+     * dispatching on SQLSTATE cannot tell that apart from a bug in the PL.
+     * format_type_be() names the type the value was expected to fit.
+     */
+    ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH),
+                    errmsg("cannot convert JavaScript value to %s",
+                           format_type_be(rettype)),
+                    errdetail("An array type requires a JavaScript Array.")));
   }
 
   if (type.is_composite) {
@@ -1563,7 +1574,8 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     const char *str = JS_ToCStringLen(ctx, &plen, val);
 
     if (str == NULL) {
-      elog(ERROR, "could not convert JavaScript value to a string");
+      ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                    errmsg("could not convert JavaScript value to a string")));
     }
 
     /*
@@ -1757,9 +1769,10 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
        * silently returning SQL NULL, which used to hide binding mistakes (e.g.
        * accidentally passing a number for a bytea parameter).
        */
-      elog(ERROR,
-           "cannot convert JavaScript value to bytea: expected a string, "
-           "ArrayBuffer, or typed array");
+      ereport(ERROR,
+              (errcode(ERRCODE_DATATYPE_MISMATCH),
+               errmsg("cannot convert JavaScript value to bytea"),
+               errdetail("Expected a string, ArrayBuffer or typed array.")));
     }
   }
 
@@ -1804,7 +1817,8 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
       Datum ret;
 
       if (str == NULL) {
-        elog(ERROR, "could not convert JavaScript value to a string");
+        ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                    errmsg("could not convert JavaScript value to a string")));
       }
 
       if (memchr(str, '\0', plen) != NULL) {

@@ -133,7 +133,8 @@ SELECT nrp_arr_null() IS NULL AS arr_null_is_sqlnull;
 
 CREATE FUNCTION nrp_arr_bad() RETURNS int[] LANGUAGE pljs AS $$ return 5; $$;
 SELECT nrp_arr_bad();
-ERROR:  value is not an Array
+ERROR:  cannot convert JavaScript value to integer[]
+DETAIL:  An array type requires a JavaScript Array.
 -- the backend is still alive and pljs still works after all of the above.
 SELECT nrp_ct_value() IS NULL AS still_working;
  still_working 
