@@ -5,7 +5,9 @@
 --
 -- Note the QuickJS stack limit does not cover this: the recursion is in pljs's
 -- own C frames, not in the interpreter, so it is invisible to the engine's own
--- stack accounting.
+-- stack accounting.  The depth bound is therefore check_stack_depth(), the same
+-- mechanism PostgreSQL's own recursive jsonb walkers use, so it honours
+-- max_stack_depth instead of a constant of pljs's own.
 --
 -- A plain `function` value crashed too, because enumerating its properties
 -- reaches `prototype`, whose `constructor` points back at the function.
@@ -47,9 +49,18 @@ CREATE FUNCTION jsonb_deep_nesting(depth int) RETURNS jsonb AS $$
   return root;
 $$ LANGUAGE pljs;
 
+-- The bound is check_stack_depth(), so this raises PostgreSQL's own
+-- "stack depth limit exceeded" and honours max_stack_depth -- rather than an
+-- arbitrary constant of pljs's own, which used to be 200 and was far tighter
+-- than what JSON.stringify() or jsonb_in accept.  Terse verbosity because the
+-- HINT quotes the local max_stack_depth setting, which varies by installation.
+\set VERBOSITY terse
 SELECT jsonb_deep_nesting(100000);
+\set VERBOSITY default
 
--- Nesting inside the limit still converts.
+-- Nesting well inside the stack budget still converts.  200 is deliberately
+-- past the old fixed cap, to show the limit is no longer that constant.
+SELECT jsonb_deep_nesting(200) IS NOT NULL AS depth_200_ok;
 SELECT jsonb_deep_nesting(50) IS NOT NULL AS depth_50_ok;
 
 -- 5) Function values: omitted as an object property, null as an array element
@@ -90,8 +101,53 @@ $$ LANGUAGE pljs;
 
 SELECT 'backend still usable' AS status;
 
+-- 6) The guard must not trade a crash for a leak.
+--
+-- pljs_jsonb_enter() raises from inside jsonb_object_from_object(), whose parent
+-- frames each hold a live JSPropertyEnum table from JS_GetOwnPropertyNames() --
+-- js_malloc'd, plus one owned atom reference per key.  The ereport longjmps past
+-- all of them, and convert_object()'s PG_CATCH can delete the PostgreSQL context
+-- but cannot free QuickJS allocations.  So rejecting a circular object leaked a
+-- table plus N atom references per nesting level, on every call, unreclaimable
+-- until the backend exited.  The conversion frames now release the table before
+-- re-throwing.
+--
+-- NOT ASSERTED HERE, deliberately: the leak is on the QuickJS heap, so
+-- pg_backend_memory_contexts cannot see it, and making it visible through
+-- pljs.memory_limit needs unique property names per iteration -- which interns a
+-- fresh atom each time and grows the runtime's atom table legitimately, by more
+-- than the leak itself.  Both the fixed and unfixed builds then hit the cap, so
+-- the two cannot be separated at a scale a regression test can use.
+-- tools/pljs-memory-matrix.sh is the instrument for this class: its OS-RSS view
+-- sees QuickJS allocations that no SQL-visible counter does.
+--
+-- What is asserted is the behaviour: every circular conversion is rejected, and
+-- the backend keeps working afterwards.
+CREATE FUNCTION jsonb_circular_retry(n int) RETURNS int AS $$
+  let caught = 0;
+  for (let i = 0; i < n; i++) {
+    const root = {};
+    let cur = root;
+    for (let d = 0; d < 8; d++) {
+      for (let k = 0; k < 20; k++) cur['k' + k] = k;
+      cur.next = {};
+      cur = cur.next;
+    }
+    cur.loop = root;
+    try { pljs.execute('SELECT $1::jsonb', [root]); } catch (e) { caught++; }
+  }
+  // Still usable after all of that.
+  if (pljs.execute('SELECT 7 AS v')[0].v !== 7) throw new Error('SPI unusable');
+  return caught;
+$$ LANGUAGE pljs;
+
+SELECT jsonb_circular_retry(300) AS circular_conversions_rejected;
+
+DROP FUNCTION jsonb_circular_retry(int);
+
 DROP FUNCTION jsonb_circular_object();
 DROP FUNCTION jsonb_circular_array();
+
 DROP FUNCTION jsonb_circular_deep();
 DROP FUNCTION jsonb_deep_nesting(int);
 DROP FUNCTION jsonb_with_function();

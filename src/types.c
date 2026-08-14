@@ -4,6 +4,7 @@
 #include "executor/spi.h"
 #include "fmgr.h"
 #include "funcapi.h"
+#include "miscadmin.h"
 #include "parser/parse_coerce.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -2078,20 +2079,39 @@ static JsonbValue *jsonb_array_from_array(JSValue array,
  * Note the QuickJS stack limit does not help here: this recursion happens in
  * pljs's own C frames, not in the interpreter.
  */
-#define PLJS_JSONB_MAX_DEPTH 200
-
+/*
+ * Depth is bounded by check_stack_depth() rather than by a constant of our own.
+ * PostgreSQL's own recursive jsonb walkers (jsonb_in,
+ * transform_jsonb_string_values) do the same, so the limit honours
+ * max_stack_depth and a DBA who raises it gets the deeper nesting they asked
+ * for.  A fixed cap of 200 was both arbitrary and much tighter than what
+ * JSON.stringify() or jsonb_in accept, so legitimate deeply-nested data failed
+ * here while the non-binary json path succeeded.
+ *
+ * The ancestor set is therefore purely for cycle detection, and grows on demand
+ * instead of being a fixed 1.6 kB stack array.  It is palloc'd in the caller's
+ * conversion context, which convert_object() deletes on both the success and the
+ * error path, so an ereport out of here does not leak it.
+ */
 struct pljs_jsonb_state {
-  void *ancestors[PLJS_JSONB_MAX_DEPTH];
+  void **ancestors;
   int depth;
+  int capacity;
 };
 
 /*
- * Push `value` onto the ancestor stack, raising if it is already there (cycle)
- * or if the nesting limit is reached.
+ * Push `value` onto the ancestor stack, raising if it is already there (a cycle)
+ * or if we are running out of C stack.
  */
 static void pljs_jsonb_enter(JSValueConst value,
                              struct pljs_jsonb_state *state) {
   void *ptr = JS_VALUE_GET_PTR(value);
+
+  /*
+   * The recursion is in pljs's own C frames, not in the interpreter, so the
+   * QuickJS stack limit never sees it.
+   */
+  check_stack_depth();
 
   for (int i = 0; i < state->depth; i++) {
     if (state->ancestors[i] == ptr) {
@@ -2100,12 +2120,17 @@ static void pljs_jsonb_enter(JSValueConst value,
     }
   }
 
-  if (state->depth >= PLJS_JSONB_MAX_DEPTH) {
-    ereport(ERROR,
-            (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-             errmsg("JavaScript value nested too deeply to convert to jsonb"),
-             errdetail("The maximum nesting depth is %d.",
-                       PLJS_JSONB_MAX_DEPTH)));
+  if (state->depth >= state->capacity) {
+    int newcap = state->capacity ? state->capacity * 2 : 32;
+
+    if (state->ancestors == NULL) {
+      state->ancestors = (void **) palloc(sizeof(void *) * newcap);
+    } else {
+      state->ancestors =
+          (void **) repalloc(state->ancestors, sizeof(void *) * newcap);
+    }
+
+    state->capacity = newcap;
   }
 
   state->ancestors[state->depth++] = ptr;
@@ -2114,6 +2139,19 @@ static void pljs_jsonb_enter(JSValueConst value,
 static void pljs_jsonb_leave(struct pljs_jsonb_state *state) {
   Assert(state->depth > 0);
   state->depth--;
+}
+
+/*
+ * Release a property-name table from JS_GetOwnPropertyNames(): the table itself
+ * is js_malloc'd and every tab[i].atom is an owned reference.
+ */
+static void pljs_free_property_table(JSContext *ctx, JSPropertyEnum *tab,
+                                     uint32_t len) {
+  for (uint32_t i = 0; i < len; i++) {
+    JS_FreeAtom(ctx, tab[i].atom);
+  }
+
+  js_free(ctx, tab);
 }
 
 /**
@@ -2367,61 +2405,78 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
                     errmsg("could not enumerate JavaScript object properties")));
   }
 
-  // Iterate through the `Object` keys.
-  for (uint32_t object_key = 0; object_key < object_keys_length; object_key++) {
-    // Get the value.
-    JSValue o =
-        JS_GetPropertyInternal(ctx, object, tab[object_key].atom, object, 0);
-
-    /*
-     * JSON.stringify() omits function-valued properties entirely; do the same.
-     * Beyond matching JSON semantics this avoids descending into a function's
-     * `prototype`, whose `constructor` points back at the function -- an
-     * unbounded recursion that used to crash the backend.
-     */
-    if (JS_IsFunction(ctx, o)) {
-      JS_FreeValue(ctx, o);
-      continue;
-    }
-
-    const char *key = JS_AtomToCString(ctx, tab[object_key].atom);
-
-    value = jsonb_from_value(o, pstate, WJB_KEY, ctx, key);
-
-    /*
-     * Date before the generic object test: a Date has no own properties, so
-     * the JS_IsObject() branch turned every Date in a jsonb result into `{}`
-     * and the ISO-string conversion below was dead code.
-     */
-    if (Is_Date(o)) {
-      value = jsonb_from_value(o, pstate, WJB_VALUE, ctx, NULL);
-    } else if (JS_IsArray(ctx, o)) {
-      // If the value is an `Array` the convert it.
-      value = jsonb_array_from_array(o, pstate, ctx, state);
-    } else if (JS_IsObject(o)) {
-      // Or convert an `Object`.
-      value = jsonb_object_from_object(o, pstate, ctx, state);
-    } else {
-      // Or anything else.
-      value = jsonb_from_value(o, pstate, WJB_VALUE, ctx, NULL);
-    }
-
-    // Free up the memory.
-    JS_FreeValue(ctx, o);
-  }
-
   /*
-   * Release the property-name table and its atom references handed back by
-   * JS_GetOwnPropertyNames().  The key C-strings are freed by jsonb_from_value()
-   * (WJB_KEY), but the table itself is js_malloc'd and each tab[i].atom is an
-   * owned reference; leaking them grows the QuickJS runtime heap on every
-   * JS-object -> jsonb conversion (a very hot path for functions returning
-   * jsonb), eventually tripping pljs.memory_limit in a long-running backend.
+   * From here to the free below this frame owns `tab` and every atom in it, and
+   * anything we descend into can raise: a circular structure, exhausted C stack,
+   * a failed conversion.  Those longjmp straight past this frame, and
+   * convert_object()'s PG_CATCH can delete the PostgreSQL context but cannot
+   * free QuickJS allocations -- so without this guard a function returning a
+   * circular object leaked a table plus one atom reference per key, per nesting
+   * level, on every call.  That turned a crash into a permanent QuickJS-heap
+   * leak counted against pljs.memory_limit, which a retry loop over bad input
+   * walks into "out of memory".
    */
-  for (uint32_t object_key = 0; object_key < object_keys_length; object_key++) {
-    JS_FreeAtom(ctx, tab[object_key].atom);
+  JSValue volatile current = JS_UNDEFINED;
+
+  PG_TRY();
+  {
+    // Iterate through the `Object` keys.
+    for (uint32_t object_key = 0; object_key < object_keys_length;
+         object_key++) {
+      // Get the value.
+      JSValue o =
+          JS_GetPropertyInternal(ctx, object, tab[object_key].atom, object, 0);
+
+      current = o;
+
+      /*
+       * JSON.stringify() omits function-valued properties entirely; do the same.
+       * Beyond matching JSON semantics this avoids descending into a function's
+       * `prototype`, whose `constructor` points back at the function -- an
+       * unbounded recursion that used to crash the backend.
+       */
+      if (JS_IsFunction(ctx, o)) {
+        JS_FreeValue(ctx, o);
+        current = JS_UNDEFINED;
+        continue;
+      }
+
+      const char *key = JS_AtomToCString(ctx, tab[object_key].atom);
+
+      value = jsonb_from_value(o, pstate, WJB_KEY, ctx, key);
+
+      /*
+       * Date before the generic object test: a Date has no own properties, so
+       * the JS_IsObject() branch turned every Date in a jsonb result into `{}`
+       * and the ISO-string conversion below was dead code.
+       */
+      if (Is_Date(o)) {
+        value = jsonb_from_value(o, pstate, WJB_VALUE, ctx, NULL);
+      } else if (JS_IsArray(ctx, o)) {
+        // If the value is an `Array` the convert it.
+        value = jsonb_array_from_array(o, pstate, ctx, state);
+      } else if (JS_IsObject(o)) {
+        // Or convert an `Object`.
+        value = jsonb_object_from_object(o, pstate, ctx, state);
+      } else {
+        // Or anything else.
+        value = jsonb_from_value(o, pstate, WJB_VALUE, ctx, NULL);
+      }
+
+      // Free up the memory.
+      JS_FreeValue(ctx, o);
+      current = JS_UNDEFINED;
+    }
   }
-  js_free(ctx, tab);
+  PG_CATCH();
+  {
+    JS_FreeValue(ctx, current);
+    pljs_free_property_table(ctx, tab, object_keys_length);
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  pljs_free_property_table(ctx, tab, object_keys_length);
 
   // Push that we are at the end of an object.
   value = jsonb_push(pstate, WJB_END_OBJECT, NULL);
@@ -2449,7 +2504,7 @@ static Jsonb *convert_object(JSValue object, JSContext *ctx) {
 
   JsonbBuildState parse_state = {0};
   JsonbValue *volatile value = NULL;
-  struct pljs_jsonb_state state = {.depth = 0};
+  struct pljs_jsonb_state state = {.ancestors = NULL, .depth = 0, .capacity = 0};
 
   /*
    * The conversion can now raise (circular structure, nesting limit, a numeric
