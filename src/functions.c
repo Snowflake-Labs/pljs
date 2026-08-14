@@ -1296,6 +1296,28 @@ static JSValue pljs_commit(JSContext *ctx, JSValueConst this_val, int argc,
      */
     MemoryContextSwitchTo(m_mcontext);
     ErrorData *edata = CopyErrorData();
+
+    /*
+     * ... but only failures that left the transaction alone may be handed back
+     * to JavaScript.
+     *
+     * SPI_commit() rejects a commit in an atomic context up front, before
+     * touching anything (ERRCODE_INVALID_TRANSACTION_TERMINATION), so the
+     * transaction is exactly as it was and resuming the function is safe.
+     *
+     * Any other failure means the commit got far enough to matter and
+     * SPI_start_transaction() below never ran, so there is no valid transaction
+     * state to return into.  Converting that into a catchable JS exception let
+     * the rest of the function keep running against a broken backend, so
+     * re-throw it instead.  Nothing is flushed on this path: the error stays on
+     * the stack for the re-throw, and the enclosing handler unwinds it.
+     */
+    if (edata->sqlerrcode != ERRCODE_INVALID_TRANSACTION_TERMINATION) {
+      FreeErrorData(edata);
+      CurrentResourceOwner = m_resowner;
+      PG_RE_THROW();
+    }
+
     JSValue error = js_throw_error_data(edata, ctx);
 
     FlushErrorState();
@@ -1333,6 +1355,18 @@ static JSValue pljs_rollback(JSContext *ctx, JSValueConst this_val, int argc,
     /* Flush the caught error; see pljs_commit() for why this is mandatory. */
     MemoryContextSwitchTo(m_mcontext);
     ErrorData *edata = CopyErrorData();
+
+    /*
+     * Only an up-front rejection may be handed back to JavaScript; see
+     * pljs_commit() for the reasoning.  Anything else means the rollback got
+     * far enough to matter and SPI_start_transaction() never ran.
+     */
+    if (edata->sqlerrcode != ERRCODE_INVALID_TRANSACTION_TERMINATION) {
+      FreeErrorData(edata);
+      CurrentResourceOwner = m_resowner;
+      PG_RE_THROW();
+    }
+
     JSValue error = js_throw_error_data(edata, ctx);
 
     FlushErrorState();
