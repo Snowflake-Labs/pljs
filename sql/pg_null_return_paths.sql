@@ -96,3 +96,42 @@ DROP FUNCTION nrp_ct_null, nrp_ct_undef, nrp_ct_value, nrp_rec_null,
   nrp_domain_fn, nrp_time, nrp_uuid_value, nrp_arr_null, nrp_arr_bad;
 DROP DOMAIN nrp_domain;
 DROP TYPE nrp_composite;
+
+-- The crash was reachable from `undefined` as well as `null`, so pin both rather
+-- than assuming they share a path.  Requested on the PR 11 review.
+CREATE FUNCTION nrp_record_undef() RETURNS record AS $$
+  return undefined;
+$$ LANGUAGE pljs;
+
+-- A column definition list is required for RETURNS record (see the clearer error
+-- added elsewhere in this series); with one, undefined must come back as a NULL
+-- row rather than crashing.
+SELECT (SELECT count(*) FROM nrp_record_undef() AS t(a int, b text)
+         WHERE a IS NULL AND b IS NULL) AS record_undefined_null_rows;
+
+CREATE TYPE nrp_undef_pair AS (a int, b text);
+
+CREATE FUNCTION nrp_comp_undef() RETURNS nrp_undef_pair AS $$
+  return undefined;
+$$ LANGUAGE pljs;
+
+SELECT nrp_comp_undef() IS NULL AS composite_undefined_is_null;
+
+-- A composite SETOF whose rows include a NULL one: this is where PR 11's hoisted
+-- null check and PR 13's return_next(null) meet, and the review asked for the
+-- interaction to be pinned rather than inferred from the two changes separately.
+CREATE FUNCTION nrp_setof_with_null_row() RETURNS SETOF nrp_undef_pair AS $$
+  pljs.return_next({ a: 1, b: 'one' });
+  pljs.return_next(null);
+  pljs.return_next(undefined);
+  pljs.return_next({ a: 2, b: 'two' });
+$$ LANGUAGE pljs;
+
+SELECT count(*) AS rows_total,
+       count(*) FILTER (WHERE a IS NULL AND b IS NULL) AS all_null_rows,
+       count(*) FILTER (WHERE a IS NOT NULL) AS real_rows
+  FROM nrp_setof_with_null_row();
+
+DROP FUNCTION nrp_record_undef, nrp_comp_undef, nrp_setof_with_null_row;
+DROP TYPE nrp_undef_pair;
+

@@ -57,3 +57,32 @@ SELECT count(*) AS rows FROM rnn_only_nulls();
 DROP FUNCTION rnn_setof, rnn_table, rnn_wide, rnn_bad_num, rnn_bad_str,
   rnn_only_nulls;
 DROP TYPE rnn_ct;
+
+-- return_next(null) for a SINGLE-column set.
+--
+-- The composite guard is inside the is_composite branch, so a single-column set
+-- falls through to the scalar path, where PR 11's hoisted null check makes it a
+-- NULL scalar.  That is correct, but it is correct by two changes interacting
+-- rather than by anything in this commit, so the review asked for it to be pinned
+-- explicitly rather than inferred.
+CREATE FUNCTION rnr_single() RETURNS SETOF int AS $$
+  pljs.return_next(1);
+  pljs.return_next(null);
+  pljs.return_next(undefined);
+  pljs.return_next(2);
+$$ LANGUAGE pljs;
+
+SELECT count(*) AS rows_total,
+       count(*) FILTER (WHERE rnr_single IS NULL) AS null_rows
+  FROM rnr_single();
+
+-- Same for a single-column RETURNS TABLE, which takes a different descriptor path.
+CREATE FUNCTION rnr_single_table() RETURNS TABLE(v text) AS $$
+  pljs.return_next('a');
+  pljs.return_next(null);
+$$ LANGUAGE pljs;
+
+SELECT count(*) AS rows_total, count(v) AS non_null FROM rnr_single_table();
+
+DROP FUNCTION rnr_single, rnr_single_table;
+
