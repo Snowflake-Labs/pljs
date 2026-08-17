@@ -34,6 +34,45 @@
 # MM_EXPECT_LEAK is how we prove the harness can actually detect something: run
 # it against a known-leaky build and it must report a leak.  A detector that
 # stays quiet on leaky code is worthless.
+#
+# WHERE THE THRESHOLDS COME FROM.  Each was measured on PostgreSQL 17, not picked
+# for looking reasonable.
+#
+#   per-call context COUNT (0, exact)      A leaked context is a bug at any count,
+#                                          so this is an assertion, not a budget.
+#
+#   context BYTES (4MB over the run)       Steady state is ~56KB.  The slack is
+#                                          three orders of magnitude above that
+#                                          because the check is for a *trend*; if
+#                                          bytes are trending the run fails long
+#                                          before 4MB matters.
+#
+#   RSS (24MB flat, or 25KB/churn iter)  RSS is the only view of the QuickJS/libc
+#                                          heap, and also the only one that sees
+#                                          PostgreSQL's own growth -- so with DDL
+#                                          churn on, most of what it measures is
+#                                          not pljs.  Measured per iteration, in a
+#                                          single session:
+#
+#                                            ALTER COLUMN TYPE x2   47.6 KB
+#                                            failed pljs validation  4.6 KB
+#                                            CREATE OR REPLACE pljs  3.35 KB
+#                                            ... same, plpgsql       2.72 KB
+#                                            plain pljs call          0 KB
+#
+#                                          The table rewrite dominates and belongs
+#                                          entirely to PostgreSQL; pljs's own
+#                                          marginal cost over plpgsql for the same
+#                                          DDL is ~0.6 KB.  A flat MB budget
+#                                          therefore just measures how many churn
+#                                          iterations fit in the run, which is why
+#                                          the budget scales with that count.
+#                                          MM_CHURN_CONTROL=1 re-measures the
+#                                          PostgreSQL floor whenever this needs
+#                                          re-checking.
+#
+# The call path itself does not grow: 5000-call batches after the first show
+# +0/+16/+0/+0 KB, so warm-up is real and the plateau is real.
 
 set -uo pipefail
 
@@ -48,6 +87,18 @@ MEMLIMIT="${MM_MEMORY_LIMIT:-}"
 EXPECT_LEAK="${MM_EXPECT_LEAK:-0}"
 CHURN_CONTROL="${MM_CHURN_CONTROL:-0}"
 RSS_SLACK_MB="${MM_RSS_SLACK_MB:-24}"
+# Ceiling on RSS growth per churn iteration, used instead of an absolute budget
+# whenever churn runs.  Observed on PostgreSQL 17: 14.1 and 14.4 KB/iter across two
+# pljs runs, 11.5 KB/iter for the plpgsql control -- so ~14KB is what this workload
+# costs and almost all of it is PostgreSQL's.  25 is a little under twice that: high
+# enough not to trip on run-to-run variation, low enough that the leak this harness
+# was written for is caught immediately, since an orphaned JSContext is ~68KB per
+# DDL and the original blanket-reset bug reached 536MB before crashing.
+#
+# Note this is NOT the ~53KB/iter that the same DDL costs in a tight single-session
+# loop.  That cost is not linear -- catalog bloat and relcache growth level off --
+# so a budget taken from the microbenchmark is roughly 5x too loose to gate on.
+CHURN_KB_PER_ITER="${MM_CHURN_KB_PER_ITER:-25}"
 BYTES_SLACK_MB="${MM_BYTES_SLACK_MB:-4}"
 
 APP="pljs_mm_$$"
@@ -62,6 +113,10 @@ echo "pljs-memory-matrix: loading scenarios"
 "${PSQL[@]}" -f "$SQLDIR/setup.sql" >/dev/null || {
   echo "pljs-memory-matrix: setup failed" >&2; exit 2; }
 "${PSQL[@]}" -c 'TRUNCATE pljs_mm_samples' >/dev/null
+# Sequences persist across runs, so the churn counter has to be reset or the
+# per-iteration RSS figure is divided by every previous run's iterations too --
+# which would make the gate looser every time it is run.
+"${PSQL[@]}" -c 'ALTER SEQUENCE pljs_mm_churn_iters RESTART' >/dev/null 2>&1
 
 # ---------------------------------------------------------------------------
 # Phase 1: pgbench, one backend, weighted mix.
@@ -240,8 +295,29 @@ if [ -n "${p2_after:-}" ] && [ "${p2_after:-0}" -gt "${p2_before:-0}" ]; then
   fail=1
 fi
 
+# How much churn actually ran, so the RSS budget can account for PostgreSQL's own
+# per-iteration cost rather than pretending it is zero.
+# is_called matters: a sequence that has never been advanced reports last_value=1,
+# so reading last_value alone would claim one iteration ran when none did.
+churn_iters=$("${PSQL[@]}" -At -c \
+  "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM pljs_mm_churn_iters" \
+  2>/dev/null || echo 0)
+churn_iters=${churn_iters:-0}
+if [ "${#CHURN_ARG[@]}" -eq 0 ]; then
+  churn_iters=0
+fi
+if [ "$churn_iters" -gt 0 ]; then
+  printf 'pljs-memory-matrix: churn iterations=%s, RSS ceiling=%sKB/iter\n' \
+    "$churn_iters" "$CHURN_KB_PER_ITER"
+fi
+
 if [ -n "$rss_samples" ]; then
-  rss_verdict=$(printf '%s' "$rss_samples" | awk -v slack="$RSS_SLACK_MB" '{
+  # With churn running, gate on growth per churn iteration rather than an absolute
+  # figure: an absolute budget scaled to the iteration count is dominated by
+  # PostgreSQL's own DDL cost and stops discriminating.  Without churn, growth
+  # should be flat, so the absolute slack is the right check.
+  rss_verdict=$(printf '%s' "$rss_samples" | awk -v slack="$RSS_SLACK_MB" \
+      -v iters="$churn_iters" -v periter="$CHURN_KB_PER_ITER" '{
     n = NF; if (n < 6) { printf "too few samples (%d)", n; exit }
     # discard the first third as warm-up, then compare halves of the remainder
     start = int(n/3) + 1; mid = start + int((n - start) / 2)
@@ -249,8 +325,14 @@ if [ -n "$rss_samples" ]; then
     for (i = mid + 1; i <= n; i++) { b += $i; bc++ }
     if (ac == 0 || bc == 0) { printf "too few samples"; exit }
     am = a/ac/1024; bm = b/bc/1024; d = bm - am
-    printf "first=%.1fMB last=%.1fMB delta=%+.1fMB %s", am, bm, d,
-           (d > slack ? "FAIL" : "ok")
+    if (iters > 0) {
+      kb = (d * 1024) / iters
+      printf "first=%.1fMB last=%.1fMB delta=%+.1fMB = %.1fKB per churn iteration %s",
+             am, bm, d, kb, (kb > periter ? "FAIL" : "ok")
+    } else {
+      printf "first=%.1fMB last=%.1fMB delta=%+.1fMB %s", am, bm, d,
+             (d > slack ? "FAIL" : "ok")
+    }
   }')
   if [ "$CHURN_CONTROL" = "1" ]; then
     # A control run is a measurement, not a gate: this RSS delta is PostgreSQL's

@@ -13,6 +13,7 @@
 -- below which the pljs number means nothing, so the two are compared rather than
 -- the pljs number being read against a slack figure picked by hand.
 SELECT nextval('pljs_mm_calls');
+SELECT nextval('pljs_mm_churn_iters');
 
 CREATE OR REPLACE FUNCTION mm_churn_ctl_fn() RETURNS int AS $$ BEGIN RETURN 1; END $$ LANGUAGE plpgsql;
 SELECT mm_churn_ctl_fn();

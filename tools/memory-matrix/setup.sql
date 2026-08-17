@@ -17,6 +17,9 @@ CREATE EXTENSION IF NOT EXISTS pljs;
 -- A sequence, not a table counter: nextval() survives the subtransaction
 -- rollback that every caught failure performs, so the call count stays honest.
 CREATE SEQUENCE IF NOT EXISTS pljs_mm_calls;
+-- Counted separately from pljs_mm_calls so the RSS budget can be scaled by how
+-- much DDL churn actually ran; see the RSS verdict in pljs-memory-matrix.sh.
+CREATE SEQUENCE IF NOT EXISTS pljs_mm_churn_iters;
 
 CREATE TABLE IF NOT EXISTS pljs_mm_samples (
   sample_no  bigserial primary key,

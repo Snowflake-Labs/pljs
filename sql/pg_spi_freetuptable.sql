@@ -1,4 +1,17 @@
--- Regression test for the missing SPI_freetuptable() in pljs_execute.
+-- Coverage, NOT a discriminating regression test.  Review confirmed it passes
+-- against the unfixed base, and that is expected rather than a defect in the test:
+-- the symptom is a dangling SPI_tuptable pointer, so whether a plain SELECT
+-- notices depends on what the allocator does with the freed chunk.  A test that
+-- reliably crashes on the old code cannot be written at this level; catching it
+-- deterministically needs ASan or --enable-cassert clobbering, which
+-- tools/installcheck-asan.sh exists for.
+--
+-- What this file does buy: it exercises the execute/commit interleaving that the
+-- fix is about, and it would catch a regression that made the path fail outright
+-- rather than subtly.  Read the row counts below as a liveness assertion.
+--
+-- The fix it accompanies -- the missing SPI_freetuptable() in pljs_execute --
+-- follows.
 --
 -- pljs_plan_execute() freed its SPI tuptable after converting results, but
 -- pljs_execute() (backing pljs.execute()) did not. After a pljs.commit() resets

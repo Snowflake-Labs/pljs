@@ -4,6 +4,7 @@
 -- about; doing it mid-soak also checks that the invalidation path itself does
 -- not leak.
 SELECT nextval('pljs_mm_calls');
+SELECT nextval('pljs_mm_churn_iters');
 
 -- Replace a function body in place, then call it.
 CREATE OR REPLACE FUNCTION mm_churn_fn() RETURNS int AS $$ return 1; $$ LANGUAGE pljs;

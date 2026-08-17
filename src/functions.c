@@ -332,6 +332,16 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
     ErrorData *edata = CopyErrorData();
     JSValue error = js_throw_error_data(edata, ctx);
 
+    /*
+     * FlushErrorState() after RollbackAndReleaseCurrentSubTransaction() is
+     * deliberate: abort processing runs while the caught error is still on the
+     * errordata stack.  This is the order PL/pgSQL uses in exec_stmt_block()'s
+     * exception handler -- copy, roll back, then flush -- and the
+     * CopyErrorData() above is what makes it safe, since everything we need is
+     * already in our own memory context by then.  Flushing first would discard
+     * the error before it has been copied.  The other PG_CATCH() blocks in this
+     * file follow the same order for the same reason.
+     */
     RollbackAndReleaseCurrentSubTransaction();
     MemoryContextSwitchTo(m_mcontext);
     CurrentResourceOwner = m_resowner;
@@ -623,6 +633,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
     ErrorData *edata = CopyErrorData();
     JSValue error = js_throw_error_data(edata, ctx);
 
+    /* Rollback-then-flush, as in exec_stmt_block(); see pljs_execute(). */
     RollbackAndReleaseCurrentSubTransaction();
     CurrentResourceOwner = m_resowner;
     FlushErrorState();
@@ -993,6 +1004,7 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
     ErrorData *edata = CopyErrorData();
     JSValue error = js_throw_error_data(edata, ctx);
 
+    /* Rollback-then-flush, as in exec_stmt_block(); see pljs_execute(). */
     RollbackAndReleaseCurrentSubTransaction();
     FlushErrorState();
     FreeErrorData(edata);
@@ -1126,6 +1138,7 @@ static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
     MemoryContextSwitchTo(m_mcontext);
     ErrorData *edata = CopyErrorData();
     JSValue error = js_throw_error_data(edata, ctx);
+    /* Rollback-then-flush, as in exec_stmt_block(); see pljs_execute(). */
     RollbackAndReleaseCurrentSubTransaction();
     MemoryContextSwitchTo(m_mcontext);
     CurrentResourceOwner = m_resowner;
@@ -1209,6 +1222,7 @@ static JSValue pljs_plan_cursor_move(JSContext *ctx, JSValueConst this_val,
     MemoryContextSwitchTo(m_mcontext);
     ErrorData *edata = CopyErrorData();
     JSValue error = js_throw_error_data(edata, ctx);
+    /* Rollback-then-flush, as in exec_stmt_block(); see pljs_execute(). */
     RollbackAndReleaseCurrentSubTransaction();
     MemoryContextSwitchTo(m_mcontext);
     CurrentResourceOwner = m_resowner;
@@ -1264,6 +1278,7 @@ static JSValue pljs_plan_cursor_close(JSContext *ctx, JSValueConst this_val,
     MemoryContextSwitchTo(m_mcontext);
     ErrorData *edata = CopyErrorData();
     JSValue error = js_throw_error_data(edata, ctx);
+    /* Rollback-then-flush, as in exec_stmt_block(); see pljs_execute(). */
     RollbackAndReleaseCurrentSubTransaction();
     MemoryContextSwitchTo(m_mcontext);
     CurrentResourceOwner = m_resowner;
@@ -2259,6 +2274,7 @@ static JSValue pljs_subtransaction(JSContext *ctx, JSValueConst this_val,
     }
 
     if (stage == 1) {
+      /* Rollback-then-flush, as in exec_stmt_block(); see pljs_execute(). */
       RollbackAndReleaseCurrentSubTransaction();
       MemoryContextSwitchTo(m_mcontext);
     }

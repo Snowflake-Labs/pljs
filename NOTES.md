@@ -208,6 +208,21 @@ These are not data-format changes, but they alter how a backend behaves.
   until you next `CREATE OR REPLACE` them, at which point the DDL fails where it
   previously succeeded. `check_function_bodies = off` skips validation, as it always
   has, so dump/restore is unaffected.
+- **A trigger can now use SPI.** `call_trigger()` never connected to SPI, so
+  `pljs.execute()`, `pljs.prepare()` and cursors all failed inside a trigger
+  function -- not only DDL, but a bare `pljs.execute("SELECT 1")`. Querying from a
+  trigger is much of the point of a trigger, so this made a large part of that
+  surface unusable. Upstream reports it as `execution error`; the error-surfacing
+  changes above turn it into the real `current transaction is aborted`, which is
+  what made it findable.
+- **`pljs.find_function()` no longer crashes the backend.** It returned the
+  compiled function straight out of the cache without taking a reference, while the
+  engine assumed ownership of the returned value and decremented it. After enough
+  lookups the refcount reached zero with the entry still cached, and the next call
+  through it terminated the backend. A loop of `pljs.find_function('f')()` with a
+  plain call to `f()` mixed in reproduces it in about a thousand iterations.
+  `pljs.start_proc` was also leaking both the function and the call result on every
+  context creation.
 - **A replaced function takes effect in sessions other than the one that replaced
   it.** pljs caches compiled functions per session and registered no invalidation
   callback, so `CREATE OR REPLACE FUNCTION` was invisible to every other backend: a
