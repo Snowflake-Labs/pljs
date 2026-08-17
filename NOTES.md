@@ -208,6 +208,16 @@ These are not data-format changes, but they alter how a backend behaves.
   until you next `CREATE OR REPLACE` them, at which point the DDL fails where it
   previously succeeded. `check_function_bodies = off` skips validation, as it always
   has, so dump/restore is unaffected.
+- **A replaced function takes effect in sessions other than the one that replaced
+  it.** pljs caches compiled functions per session and registered no invalidation
+  callback, so `CREATE OR REPLACE FUNCTION` was invisible to every other backend: a
+  session that had already called the function kept running the body it first
+  compiled, for the rest of its life. Deploying a new function body therefore
+  required every existing connection to be recycled -- and nothing said so, which
+  makes it the kind of bug that looks like a failed deploy. The cached entry now
+  records which `pg_proc` tuple it came from and is rechecked on every call, the
+  same mechanism plpgsql uses. This also fixes `DROP FUNCTION` followed by OID
+  reuse, where the old body could run under the new function's name.
 - **Repeated DDL no longer grows the backend without bound.** Creating or replacing a
   pljs function reset the *entire* compiled-function cache, destroying every
   per-user `JSContext`. QuickJS will not free a context that still has live

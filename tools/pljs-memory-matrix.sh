@@ -2,14 +2,16 @@
 #
 # pljs-memory-matrix.sh -- long-running mixed success/failure memory harness.
 #
-# WHY THIS EXISTS, given tools/pljs-soak.sh already soaks the backend:
-# pljs-soak.sh only ever exercises errors CAUGHT INSIDE JavaScript, so the
-# enclosing pljs call always succeeds.  A whole class of leak needs the error to
-# ESCAPE call_function -- an out-of-range integer, an unparseable numeric string,
-# a number bound to bytea -- and that class was invisible to every tool in this
-# repository.  It cost one memory context (~1KB) per failed call, from plain SQL,
-# without bound.  This harness drives both classes and interleaves them with
-# correctness assertions.
+# WHY THIS EXISTS, next to the other tools here:
+# tools/pljs-fuzz.py hunts conversion bugs and backend liveness, and its liveness
+# arm wraps the generated JavaScript in try/catch -- so the error is CAUGHT INSIDE
+# JavaScript and the enclosing pljs call still succeeds.  tools/pljs-cancel-checks.sh
+# is about interrupts, not memory.  A whole class of leak needs the error to ESCAPE
+# call_function -- an out-of-range integer, an unparseable numeric string, a number
+# bound to bytea -- and nothing here drove that.  It cost one memory context (~1KB)
+# per failed call, from plain SQL, without bound.  This harness drives both classes
+# and interleaves them with correctness assertions, so a leak and a wrong answer
+# after a failure are both caught.
 #
 # WHAT IT MEASURES, and why three views are needed:
 #   * per-call context COUNT   -- a hard assertion (must be 0 between calls),
@@ -44,6 +46,7 @@ PORT="${PGPORT:-5432}"
 HOST="${PGHOST:-/tmp}"
 MEMLIMIT="${MM_MEMORY_LIMIT:-}"
 EXPECT_LEAK="${MM_EXPECT_LEAK:-0}"
+CHURN_CONTROL="${MM_CHURN_CONTROL:-0}"
 RSS_SLACK_MB="${MM_RSS_SLACK_MB:-24}"
 BYTES_SLACK_MB="${MM_BYTES_SLACK_MB:-4}"
 
@@ -83,8 +86,16 @@ echo "pljs-memory-matrix: phase 1 -- pgbench mixed workload"
 #
 # MM_DDL_CHURN=0 turns it off, for bisecting against a build that still has the
 # leak.
+#
+# MM_CHURN_CONTROL=1 swaps churn.sql for churn_control.sql, which runs the
+# identical DDL with plpgsql bodies.  That measures what PostgreSQL alone costs
+# for this workload, which is the floor the pljs number has to be read against --
+# see the RSS verdict below.
 CHURN_ARG=(-f "$SQLDIR/churn.sql@2")
-if [ "${MM_DDL_CHURN:-1}" = "0" ]; then
+if [ "$CHURN_CONTROL" = "1" ]; then
+  echo "pljs-memory-matrix: CONTROL run -- plpgsql churn, measuring PostgreSQL's own cost"
+  CHURN_ARG=(-f "$SQLDIR/churn_control.sql@2")
+elif [ "${MM_DDL_CHURN:-1}" = "0" ]; then
   echo "pljs-memory-matrix: DDL churn disabled by MM_DDL_CHURN=0"
   CHURN_ARG=()
 fi
@@ -241,8 +252,14 @@ if [ -n "$rss_samples" ]; then
     printf "first=%.1fMB last=%.1fMB delta=%+.1fMB %s", am, bm, d,
            (d > slack ? "FAIL" : "ok")
   }')
-  echo "pljs-memory-matrix: backend RSS  $rss_verdict"
-  case "$rss_verdict" in *FAIL) fail=1;; esac
+  if [ "$CHURN_CONTROL" = "1" ]; then
+    # A control run is a measurement, not a gate: this RSS delta is PostgreSQL's
+    # own cost for the churn DDL, and is the number to compare a pljs run against.
+    echo "pljs-memory-matrix: backend RSS  ${rss_verdict% *}  (control -- not a verdict)"
+  else
+    echo "pljs-memory-matrix: backend RSS  $rss_verdict"
+    case "$rss_verdict" in *FAIL) fail=1;; esac
+  fi
 else
   echo "pljs-memory-matrix: backend RSS  not sampled"
 fi
@@ -266,6 +283,12 @@ if [ "$fail" -ne 0 ]; then
   echo "pljs-memory-matrix: FAIL"
   exit 1
 fi
-echo "pljs-memory-matrix: OK - no per-call context survived, bytes and RSS plateaued,"
-echo "                    and every post-failure assertion returned correct answers"
+if [ "$CHURN_CONTROL" = "1" ]; then
+  echo "pljs-memory-matrix: OK - control run complete; the RSS delta above is what"
+  echo "                    PostgreSQL alone costs for this DDL, and is the floor to"
+  echo "                    read a pljs run against.  RSS was not gated here."
+else
+  echo "pljs-memory-matrix: OK - no per-call context survived, bytes and RSS plateaued,"
+  echo "                    and every post-failure assertion returned correct answers"
+fi
 exit 0
