@@ -23,6 +23,18 @@
 # purpose, which is why it is off by default here -- ASan's value for this
 # extension is bounds and use-after-free, not leak counting.  Use
 # tools/pljs-memory-matrix.sh for leaks.
+#
+# RESULTS, so the next person knows this leg has ever actually run:
+#   * The full 96-test suite passes under ASan with zero sanitizer reports
+#     (PostgreSQL 17, Apple clang 21).
+#   * The leg is a real detector, not a no-op: introducing a deliberate 64-byte
+#     overrun in the bytea typed-array memcpy produces
+#     "AddressSanitizer: heap-buffer-overflow" and exit 1.  Worth re-checking the
+#     same way after any change to how the runtime is loaded, because the failure
+#     mode here is silent -- see the DYLD note below.
+#
+# This is what covers the two review items that asked for ASan or --enable-cassert:
+# the typed-array width overrun, and the prosrc heap over-read.
 
 set -uo pipefail
 
@@ -104,17 +116,32 @@ echo "asan: initdb $DATA"
 "$BINDIR/initdb" -D "$DATA" -N >/tmp/pljs_asan_initdb.log 2>&1 || {
   echo "asan: initdb failed; see /tmp/pljs_asan_initdb.log" >&2; exit 2; }
 
+# Exec the postmaster directly rather than through pg_ctl.  pg_ctl spawns postgres
+# as a child, and the sanitizer runtime does not survive that on macOS -- ASan then
+# initialises only when pljs.so is dlopen'd, far too late to install its
+# interceptors, and reports "Interceptors are not working" instead of checking
+# anything.  Setting the variable on the postgres binary itself is what makes the
+# preload stick.
 echo "asan: starting postmaster with $PRELOAD_VAR set"
-env "$PRELOAD_VAR=$RT" "$BINDIR/pg_ctl" -D "$DATA" -l "$LOG" \
-    -o "-p $PORT -k $SOCK -c listen_addresses='' -c max_prepared_transactions=4" \
-    -w -t 120 start >/dev/null 2>&1 || {
-  echo "asan: postmaster failed to start; see $LOG" >&2; tail -30 "$LOG" >&2; exit 2; }
+env "$PRELOAD_VAR=$RT" "$BINDIR/postgres" -D "$DATA" -p "$PORT" -k "$SOCK" \
+    -c listen_addresses='' -c max_prepared_transactions=4 \
+    >"$LOG" 2>&1 &
+PMPID=$!
+
+for _ in $(seq 1 120); do
+  "$BINDIR/pg_isready" -h "$SOCK" -p "$PORT" >/dev/null 2>&1 && break
+  kill -0 "$PMPID" 2>/dev/null || { echo "asan: postmaster died; see $LOG" >&2; tail -30 "$LOG" >&2; exit 2; }
+  sleep 1
+done
+"$BINDIR/pg_isready" -h "$SOCK" -p "$PORT" >/dev/null 2>&1 || {
+  echo "asan: postmaster did not become ready; see $LOG" >&2; tail -30 "$LOG" >&2; exit 2; }
 
 cleanup() {
   if [ "${ASAN_KEEP:-0}" = "1" ]; then
     echo "asan: instance left running on $SOCK port $PORT (ASAN_KEEP=1)"
   else
-    "$BINDIR/pg_ctl" -D "$DATA" -s stop -m immediate >/dev/null 2>&1
+    kill "$PMPID" 2>/dev/null
+    wait "$PMPID" 2>/dev/null
   fi
 }
 trap cleanup EXIT
@@ -125,8 +152,15 @@ rm -f "$ASAN_REPORT".* 2>/dev/null
 # Run the suite.  init-extension must lead: it is the only test that runs
 # CREATE EXTENSION, so any test paired without it fails on its own.
 # ---------------------------------------------------------------------------
+# init-extension has to lead, since it is the only test that runs CREATE EXTENSION
+# and every other test fails on its own without it -- but only prepend it when the
+# caller has not already asked for it, or it runs twice and the second one fails
+# with "extension already exists".
 if [ "$#" -gt 0 ]; then
-  TESTS="init-extension $*"
+  case " $* " in
+    *" init-extension "*) TESTS="$*" ;;
+    *)                    TESTS="init-extension $*" ;;
+  esac
 else
   TESTS=""
 fi
