@@ -605,15 +605,32 @@ static void setup_start_proc(JSContext *ctx) {
          configuration.start_proc);
   } else {
     JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 0, NULL);
+
     if (JS_IsException(ret)) {
       char *message = NULL, *pg_detail = NULL;
       char *detail = dump_error(ctx, &message, &pg_detail);
+
+      /*
+       * Release the JavaScript side before reporting: the ereport() below does
+       * not return, so anything freed after it is never freed at all.
+       */
+      JS_FreeValue(ctx, ret);
+      JS_FreeValue(ctx, func);
+
       ereport(
           ERROR,
           (errmsg("%s", (message && message[0]) ? message
                                                 : "start proc execution error"),
            errdetail("%s", (pg_detail && pg_detail[0]) ? pg_detail : detail)));
     }
+
+    /*
+     * pljs_find_js_function() returns a reference this function owns, and the
+     * result of the call is ours too.  Neither was freed before, so every
+     * context creation with a start_proc set leaked both.
+     */
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, func);
   }
 }
 
@@ -1825,7 +1842,21 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
   if (function_entry != NULL) {
     pljs_function_cache_to_context(&context, function_entry);
 
-    func = context.js_function;
+    /*
+     * Hand out a reference we own.  pljs_function_cache_to_context() borrows
+     * the cache's, and the cache entry is that value's only owner -- but a
+     * JSValue returned from a C function belongs to the caller, so
+     * pljs.find_function() handed JavaScript a reference it had not counted.
+     * The engine dropped it when the JS variable died, and after enough lookups
+     * the refcount reached zero while the entry was still cached, leaving the
+     * cache holding a freed object.  The next call through it crashed the
+     * backend.
+     *
+     * Reproduced on stock upstream as well as here: a loop of
+     * pljs.find_function('f')() in one session, with a plain call to f() mixed
+     * in, terminates the backend.  See sql/pg_find_function_refcount.sql.
+     */
+    func = JS_DupValue(context.ctx, context.js_function);
 
     /*
      * The pin was previously released only on the cache-miss branch below, so a
