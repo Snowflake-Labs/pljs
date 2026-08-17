@@ -1,3 +1,8 @@
+-- NB: some expected output below is QuickJS's own wording ("out of memory",
+-- "stack overflow"), which is not part of any stable interface -- it is pinned
+-- by the vendored deps/quickjs revision and will churn if that is bumped.  If a
+-- QuickJS upgrade fails here, check the message text before assuming a
+-- behaviour regression.
 -- Regression: enumerating a JS object's keys must free the property table and
 -- the atom references that JS_GetOwnPropertyNames() hands back.
 --

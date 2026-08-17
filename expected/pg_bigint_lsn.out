@@ -1,5 +1,13 @@
 -- Stressor distilled from snowflake_cdc: int64 / BigInt losslessness.
 --
+-- NB on naming: this file is about int8 *marshalling* -- that a BigInt survives a
+-- round trip through pljs without going via a double.  It is named for LSNs
+-- because that is where the requirement comes from, but it does not use the pg_lsn
+-- type at all.  Its sibling pg_bigint_semantics covers something different: BigInt
+-- *language* behaviour in QuickJS (mixing a BigInt with a Number throws).  The two
+-- do not overlap, which is why they are not merged; a review reasonably read the
+-- names as implying they did.
+--
 -- WAL LSNs are uint64 and routinely exceed 2^53, so they cannot survive a trip
 -- through a JS double. The mirror adapter (postgres/adapter.js) therefore binds
 -- JS BigInt values directly -- "pljs marshals a JS BigInt to int8 losslessly" --

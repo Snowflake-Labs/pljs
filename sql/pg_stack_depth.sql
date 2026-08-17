@@ -1,3 +1,8 @@
+-- NB: some expected output below is QuickJS's own wording ("out of memory",
+-- "stack overflow"), which is not part of any stable interface -- it is pinned
+-- by the vendored deps/quickjs revision and will churn if that is bumped.  If a
+-- QuickJS upgrade fails here, check the message text before assuming a
+-- behaviour regression.
 -- Regression: deep / unbounded JS recursion must raise a catchable
 -- "stack overflow" error and leave the backend alive -- never crash it with a
 -- C-stack SIGSEGV.

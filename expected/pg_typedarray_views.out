@@ -116,3 +116,8 @@ SELECT length(tav_empty()) AS empty_view_length, tav_empty() IS NULL AS is_null;
 DROP FUNCTION tav_all(text);
 DROP FUNCTION tav_offset(text);
 DROP FUNCTION tav_empty();
+-- On observability, since the review asked whether the original overrun needed ASan
+-- or --enable-cassert to catch: it no longer needs either.  The per-width loops that
+-- could write past their allocation are gone -- the conversion is a single memcpy of
+-- exactly the view's byteLength -- so the overrun class is structurally impossible
+-- rather than merely untriggered, and the assertions above are on values instead.

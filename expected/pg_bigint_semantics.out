@@ -1,5 +1,8 @@
 -- BigInt language semantics (ported from plv8 bigint.sql).
 --
+-- Language behaviour only.  The int8 *marshalling* contract -- that a BigInt
+-- survives a round trip losslessly -- is pg_bigint_lsn's job, not this file's.
+--
 -- types.sql already covers 1n binding to int8 and the ** operator. This pins
 -- the one edge that bites callers who mix an int8-derived BigInt with a plain
 -- Number: QuickJS throws a TypeError rather than silently coercing. Relevant
