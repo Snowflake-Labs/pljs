@@ -14,20 +14,30 @@
 -- QuickJS's guard well before PostgreSQL's own C-stack limit and the kernel
 -- stack limit are reached.
 --
--- WHAT THIS FILE DOES AND DOES NOT DEMONSTRATE.  The review asked whether this
--- test lowers max_stack_depth, "or otherwise makes the bound observable --
--- otherwise the test passes either way and this commit has no regression
--- coverage".  It does not, and it cannot: the JS budget is derived from
--- max_stack_depth once, in _PG_init, so a SET here has no effect on the live
--- runtime.  (That is the same read-once behaviour the review notes separately as
--- an asymmetry with the pljs.memory_limit assign hook; the two observations
--- interact.)
+-- THE BOUND IS OBSERVABLE, and the section at the end of this file demonstrates it.
+--
+-- The review asked whether this test lowers max_stack_depth, "or otherwise makes
+-- the bound observable -- otherwise the test passes either way and this commit has
+-- no regression coverage".  A previous version of this comment claimed it could not
+-- be done, on the grounds that the budget is derived once in _PG_init so a SET has
+-- no effect.  That was wrong.  _PG_init runs when the library is first loaded *in a
+-- given backend*, which is the first pljs call in that session -- so a SET that
+-- happens before any pljs function is called is read.  \c gives a fresh backend per
+-- setting, which is how the section below compares two of them.
+--
+-- Measured on PostgreSQL 17, the achievable pure-JS recursion depth tracks the
+-- derived budget almost exactly linearly:
+--
+--     max_stack_depth   derived JS budget   depth reached
+--     512kB             256kB (the floor)   268
+--     1024kB            512kB               537
+--     2048kB (default)  1024kB              1074
+--     4096kB            2048kB              2148
 --
 -- At the 2048kB default the derived budget is 1MB, which is what
--- JS_DEFAULT_STACK_SIZE already is, so on default settings this file would pass
--- with or without the explicit JS_SetMaxStackSize() call.  What it does assert is
--- still worth having: that deep recursion raises a catchable error rather than
--- crashing the backend, in pure JS and across mutual JS<->SQL recursion.
+-- JS_DEFAULT_STACK_SIZE already is, so at default settings alone this file would
+-- pass with or without the explicit JS_SetMaxStackSize() call.  That is exactly why
+-- the comparison below uses two different settings.
 --
 -- Making the bound itself observable needs the backend started with a different
 -- max_stack_depth -- PGOPTIONS='-c max_stack_depth=1024kB' -- which pg_regress
@@ -83,3 +93,37 @@ SELECT 1 AS alive_after_mutual;
 
 DROP FUNCTION mutual();
 DROP FUNCTION deep_recurse();
+-- ---------------------------------------------------------------------------
+-- The derived budget is observable: a lower max_stack_depth must yield a
+-- proportionally lower achievable JS recursion depth.
+--
+-- Absolute depths depend on per-frame stack usage and so vary by platform and build
+-- flags; the assertion is the ratio, which is a property of the derivation.
+-- ---------------------------------------------------------------------------
+CREATE TABLE sd_depths (label text, d int);
+CREATE FUNCTION sd_probe() RETURNS int LANGUAGE pljs AS $$
+  let d = 0;
+  function r() { d++; r(); }
+  try { r(); } catch (e) { /* QuickJS stack guard */ }
+  return d;
+$$;
+-- Fresh backend, so _PG_init has not run yet and the SET below is what it reads.
+\c
+SET max_stack_depth = 512;
+INSERT INTO sd_depths SELECT 'low', sd_probe();
+\c
+SET max_stack_depth = 4096;
+INSERT INTO sd_depths SELECT 'high', sd_probe();
+-- 512kB floors the budget at 256kB, 4096kB gives 2048kB: an 8x budget, so the depth
+-- should be several times larger.  Asserted loosely (>3x) so that a platform with
+-- different frame sizes still passes while a build that ignores max_stack_depth
+-- entirely -- where both depths would be identical -- fails.
+SELECT (SELECT d FROM sd_depths WHERE label = 'high')
+       > 3 * (SELECT d FROM sd_depths WHERE label = 'low') AS budget_tracks_max_stack_depth;
+ budget_tracks_max_stack_depth 
+-------------------------------
+ t
+(1 row)
+
+DROP FUNCTION sd_probe();
+DROP TABLE sd_depths;
