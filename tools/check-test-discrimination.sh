@@ -65,8 +65,24 @@ declare -a PROBLEMS=()
 # that is the bug being tested -- so the test's own DROP ROLE never runs, and the
 # with-fix pass then fails with "role already exists" and looks like a commit that is
 # not green on its own source.  pg_find_function_no_perm hit exactly this.
+wait_for_server() {
+  local i
+  for i in $(seq 1 60); do
+    psql -X -qAt -d postgres -c 'SELECT 1' >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  echo "    WARNING: server did not come back within 60s" >&2
+  return 1
+}
+
 drop_leftover_roles() {  # $1 = commit, $2 = space-separated test names
   local commit="$1" tests="$2" t role
+  # Wait first.  This runs straight after a pass that may have crashed the backend,
+  # and while the server is still recovering every psql here fails -- silently,
+  # because the errors are discarded -- so the roles survive and the next pass dies
+  # on "role already exists".  That is what kept pg_find_function_no_perm red after
+  # the first two attempts at fixing this.
+  wait_for_server
   for t in $tests; do
     for role in $(git show "$commit:sql/$t.sql" 2>/dev/null \
                   | sed -nE 's/^[[:space:]]*CREATE (ROLE|USER)[[:space:]]+([A-Za-z0-9_]+).*/\2/p'); do
@@ -80,15 +96,6 @@ drop_leftover_roles() {  # $1 = commit, $2 = space-separated test names
 # first act is DROP DATABASE -- which fails with "the database system is in recovery
 # mode", so the *next* pass looks like a failure that has nothing to do with the code
 # under test.  Wait for the server to come back before each pass.
-wait_for_server() {
-  local i
-  for i in $(seq 1 60); do
-    psql -X -qAt -d postgres -c 'SELECT 1' >/dev/null 2>&1 && return 0
-    sleep 1
-  done
-  echo "    WARNING: server did not come back within 60s" >&2
-  return 1
-}
 
 run_tests() {  # $1 = space-separated test names -> 0 if all passed
   local tests="$1"
