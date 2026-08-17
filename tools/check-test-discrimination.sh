@@ -40,6 +40,8 @@ cd "$ROOT" || exit 2
 
 BASE="${1:-9ec6f7f}"
 PGC="${PG_CONFIG:-pg_config}"
+# The database pg_regress uses; matches the Makefile's --dbname.
+CTD_DB="${CTD_DB:-contrib_regression}"
 
 command -v "$PGC" >/dev/null || { echo "ctd: $PGC not found" >&2; exit 2; }
 [ -n "${PGHOST:-}" ] || { echo "ctd: set PGHOST/PGPORT to a running server" >&2; exit 2; }
@@ -83,6 +85,15 @@ drop_leftover_roles() {  # $1 = commit, $2 = space-separated test names
   # on "role already exists".  That is what kept pg_find_function_no_perm red after
   # the first two attempts at fixing this.
   wait_for_server
+
+  # Drop the regression database first.  A crashed test leaves objects behind that
+  # are owned by, or grant to, the role it created -- so DROP ROLE fails with
+  # "cannot be dropped because some objects depend on it: 1 object in database
+  # contrib_regression".  pg_regress recreates the database on its next run anyway,
+  # so removing it here costs nothing and makes the roles droppable.  WITH (FORCE)
+  # takes care of the session the crashed backend may have left behind.
+  psql -X -q -d postgres -c "DROP DATABASE IF EXISTS $CTD_DB WITH (FORCE)" >/dev/null 2>&1
+
   for t in $tests; do
     for role in $(git show "$commit:sql/$t.sql" 2>/dev/null \
                   | sed -nE 's/^[[:space:]]*CREATE (ROLE|USER)[[:space:]]+([A-Za-z0-9_]+).*/\2/p'); do
