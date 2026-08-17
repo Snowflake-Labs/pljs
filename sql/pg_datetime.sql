@@ -45,7 +45,13 @@ CREATE FUNCTION dt_num() RETURNS timestamptz LANGUAGE pljs AS $$
   return 1577934245000;
 $$;
 
+-- Terse, because the HINT on this error names a GUC and PostgreSQL 18 capitalises
+-- it ("DateStyle") where 16 and 17 do not ("datestyle").  The hint is the server's
+-- wording, not pljs's, and pinning it would make this file fail on a version bump
+-- for a reason that has nothing to do with the behaviour under test.
+\set VERBOSITY terse
 SELECT dt_num();
+\set VERBOSITY default
 
 -- The two forms that do work, for contrast: a Date, and a parseable string.
 CREATE FUNCTION dt_date() RETURNS timestamptz LANGUAGE pljs AS $$

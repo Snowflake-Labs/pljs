@@ -17,6 +17,21 @@
 #include "deps/quickjs/quickjs-libc.h"
 #include "deps/quickjs/quickjs.h"
 
+/*
+ * PostgreSQL 18 removed pg_attribute_noreturn() and replaced it with pg_noreturn,
+ * which is C11 _Noreturn and so has to precede the declaration.  Before 18 only
+ * pg_attribute_noreturn() exists, which is __attribute__((noreturn)) -- and GNU
+ * attributes may also precede the declaration specifiers, so the same position
+ * works for both and one name covers every supported version.
+ *
+ * Without this, building against 18 fails with "type specifier missing, defaults to
+ * 'int'", because pg_attribute_noreturn() is simply an unknown identifier there and
+ * gets parsed as a function call.
+ */
+#ifndef pg_noreturn
+#define pg_noreturn pg_attribute_noreturn()
+#endif
+
 #define STORAGE_HASH_LEN 32
 #ifndef PLJS_VERSION
 #define PLJS_VERSION "unknown"

@@ -332,7 +332,7 @@ static char *dump_error(JSContext *ctx, char **message_out, char **detail_out) {
  * `message` and `detail` are the out-parameters from dump_error(); `fallback`
  * is used when the exception carried no message of its own.  Does not return.
  */
-pg_attribute_noreturn() static void pljs_ereport_js_error(
+pg_noreturn static void pljs_ereport_js_error(
     const char *message, const char *pg_detail, const char *detail,
     const char *fallback) {
   ereport(ERROR,
