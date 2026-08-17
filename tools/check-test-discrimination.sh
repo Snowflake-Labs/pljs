@@ -177,16 +177,33 @@ for commit in $(git rev-list --reverse "$BASE..HEAD"); do
     with="failed"
   fi
 
-  # Is any of these tests self-declared coverage-only?
+  # Two kinds of expected non-discrimination, both self-declared in the test header.
+  # Read the markers from HEAD, not from this commit: a test may be labelled later
+  # than the commit that introduced it, which is what happened to
+  # pg_spi_freetuptable.
+  #
+  #   "not a discriminating regression test"
+  #       The behaviour cannot be observed at this level at all -- a dangling pointer
+  #       whose visibility depends on the allocator, or a contract violation that does
+  #       not surface as a crash.  pg_spi_freetuptable and pg_cursor_plan_lifetime.
+  #
+  #   "strengthened after the commit that introduced it"
+  #       The version at the introducing commit genuinely did not discriminate -- the
+  #       review said so -- and it was fixed later.  The sweep runs the historical
+  #       version, so it still reports the original weakness.  pg_stack_depth.
+  #
+  #   "discriminates against an earlier commit"
+  #       The test is real, but this sweep pairs each test with the commit that adds
+  #       the *file*, which is not always the commit that introduces the behaviour.
+  #       A refactor that ships a test for behaviour added three commits earlier will
+  #       always look non-discriminating here.
   is_coverage=0
   for t in "${tests[@]}"; do
-    # Read the marker from HEAD, not from this commit: a test may be labelled
-    # coverage-only later than the commit that introduced it, which is what happened
-    # to pg_spi_freetuptable.
-    if git show "$ORIGINAL_HEAD:sql/$t.sql" 2>/dev/null \
-         | grep -qi 'not a discriminating regression test'; then
-      is_coverage=1
-    fi
+    head_src="$(git show "$ORIGINAL_HEAD:sql/$t.sql" 2>/dev/null)"
+    case "$head_src" in
+      *"not a discriminating regression test"*|*"discriminates against an earlier commit"*|*"strengthened after the commit that introduced it"*)
+        is_coverage=1 ;;
+    esac
   done
 
   if [ "$with" != "passed" ]; then

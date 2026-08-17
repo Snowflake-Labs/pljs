@@ -9,6 +9,15 @@
 --     error instead of vanishing.
 --   * A value with no byte representation (e.g. a number) bound to bytea used to
 --     become SQL NULL.  It now raises a clear error.
+--
+-- NB for tools/check-test-discrimination.sh: this test discriminates against an
+-- earlier commit than the one that adds it.  Each assertion above was fixed by its
+-- own earlier commit; the commit that ships this file routes JS strings through
+-- pg_any_to_server(), which only changes behaviour on a database whose encoding is
+-- not UTF-8.  contrib_regression is UTF-8, so that change is unobservable here by
+-- construction.  It was verified by hand on a LATIN1 database, where 'hello' with
+-- an accented e stored 6 bytes (68c3a96c6c6f, raw UTF-8) before the fix and the
+-- correct 5 (68e96c6c6f) after.
 CREATE EXTENSION IF NOT EXISTS pljs;
 
 -- 1) Embedded NUL in text: a clear error, not silent truncation, on return ...

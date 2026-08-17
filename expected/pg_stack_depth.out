@@ -14,6 +14,13 @@
 -- QuickJS's guard well before PostgreSQL's own C-stack limit and the kernel
 -- stack limit are reached.
 --
+-- NB for tools/check-test-discrimination.sh: this test was strengthened after the
+-- commit that introduced it.  As first written it did not discriminate -- the PR 7
+-- review said exactly that -- and the section at the end of this file is the fix.
+-- The sweep runs each commit's own version of a test, so it still reports the
+-- original weakness against the introducing commit; HEAD's version fails when
+-- JS_SetMaxStackSize() is stubbed out.
+--
 -- THE BOUND IS OBSERVABLE, and the section at the end of this file demonstrates it.
 --
 -- The review asked whether this test lowers max_stack_depth, "or otherwise makes

@@ -1,5 +1,11 @@
 -- Date / timestamp marshalling between PostgreSQL and JS Date.
 --
+-- NB for tools/check-test-discrimination.sh: this test discriminates against an
+-- earlier commit than the one that last touches it.  Each behaviour asserted here
+-- was fixed by its own commit; the most recent change to this file only made a
+-- server-generated HINT terse, because PostgreSQL 18 capitalises the GUC name in it
+-- where 16 and 17 do not.  A portability change cannot be discriminated against.
+--
 -- pljs marshals date / timestamp / timestamptz to a JS Date (epoch millis) and
 -- back. The snowflake_cdc procedures read timestamptz control columns
 -- (last_operation_time, last_apply_time) back as Dates, so this pins the

@@ -5,6 +5,13 @@
 -- The envelope work changed user-visible error *text* in seven expected files but
 -- added no test of its own, so the part that a caller actually programs against
 -- was uncovered.  Requested on the PR 2 review.
+--
+-- NB for tools/check-test-discrimination.sh: this test discriminates against an
+-- earlier commit than the one that adds it.  The fields it asserts were introduced
+-- by the commit that exposes the SQLSTATE as a string; the commit that ships this
+-- file only extracts the shared reporting helper, which is behaviour-preserving by
+-- design.  Reverting that refactor therefore cannot make this test fail, and the
+-- sweep flags it unless told so here.
 CREATE FUNCTION eenv_fields() RETURNS text AS $$
   try {
     pljs.execute('SELECT 1/0');

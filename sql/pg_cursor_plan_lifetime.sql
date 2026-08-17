@@ -13,13 +13,20 @@
 -- re-entered by fetch/move/close.  SPI_freeplan's own contract says a plan in
 -- use must not be freed.
 --
--- HONEST NOTE ON WHAT THIS TEST PROVES: it does not discriminate.  All three
+-- HONEST NOTE ON WHAT THIS TEST PROVES: this is not a discriminating regression
+-- test.  It does not discriminate.  All three
 -- cases below pass with and without the fix, on a build that has
 -- CLOBBER_FREED_MEMORY enabled (--enable-cassert defines it), including after
 -- deliberately churning plancache and palloc memory to encourage reuse of the
 -- freed plansource.  The portal holds a refcount on the CachedPlan rather than
 -- on the CachedPlanSource and does not appear to dereference the plansource
 -- during a fetch, so the contract violation does not surface as a crash here.
+--
+-- Also checked under AddressSanitizer with the fix reversed (see
+-- tools/installcheck-asan.sh): no report at all, so the freed plansource is not
+-- being read during a fetch even with the allocator watching.  That is further
+-- evidence for the reading above, and it is why no amount of test-writing at this
+-- level will make this discriminate.
 --
 -- The tests are kept because they pin the observable behaviour -- correct row
 -- counts across GC and across an explicit free -- so a future change that breaks
