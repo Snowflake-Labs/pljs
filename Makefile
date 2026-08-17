@@ -69,7 +69,8 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_return_next_error_frames \
 	pg_bytea_ctor_shadowing \
 	pg_error_envelope_fields \
-	pg_commit_in_procedure
+	pg_commit_in_procedure \
+	pg_validator
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 
