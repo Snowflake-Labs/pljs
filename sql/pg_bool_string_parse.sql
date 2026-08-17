@@ -110,9 +110,19 @@ SELECT bsp_obj('maybe');
 -- truthiness, which is at least the documented behaviour for it; unwrapping
 -- everything would turn {} into the text "[object Object]" and raise from boolin.
 CREATE FUNCTION bsp_plain() RETURNS bool LANGUAGE pljs AS $$ return {}; $$;
+
+SELECT bsp_plain() AS plain_object;
+
+-- An *array*, by contrast, is rejected rather than taking its truthiness.  The
+-- two shapes are treated differently on purpose: an array aimed at a non-array
+-- type had a corrupting path -- the conversion built an array Datum and returned
+-- it as the scalar, so a nested array inside an int[] came back as the inner
+-- ArrayType pointers reinterpreted as int4 -- whereas a plain object never did
+-- anything worse than yield JavaScript's documented truthiness.  So the shape
+-- that could corrupt is refused, and the shape that could not is left alone.
 CREATE FUNCTION bsp_array() RETURNS bool LANGUAGE pljs AS $$ return []; $$;
 
-SELECT bsp_plain() AS plain_object, bsp_array() AS empty_array;
+SELECT bsp_array();
 
 DROP FUNCTION bsp_obj(text);
 DROP FUNCTION bsp_plain();

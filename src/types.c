@@ -1317,10 +1317,35 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
    * A bare json/jsonb target still turns a JavaScript array into a JSON array,
    * which is what the original guard was for.
    */
-  if (JS_IsArray(ctx, val) &&
-      (type.category == TYPCATEGORY_ARRAY ||
-       (type.typid != JSONOID && type.typid != JSONBOID))) {
+  if (JS_IsArray(ctx, val) && type.category == TYPCATEGORY_ARRAY) {
     return pljs_jsvalue_to_array(&type, val, ctx, fcinfo);
+  }
+
+  /*
+   * A JavaScript array aimed at something that is not an array type and not
+   * json/jsonb.
+   *
+   * This used to dispatch to pljs_jsvalue_to_array() anyway -- the old condition
+   * was "not json/jsonb", which is true of every scalar -- so it built an array
+   * Datum and handed it back as if it were the scalar.  For a *nested* array
+   * inside an array that is silent corruption rather than an error: the element
+   * loop converts each element to the element type, so
+   * `return [[1,2],[3,4]]` for int[] produced {357119344,357119392} -- the
+   * ArrayType pointers of the two inner arrays, reinterpreted as int4.
+   *
+   * The input direction already rejects a multidimensional array with a clear
+   * message; this makes the output direction agree instead of producing numbers
+   * that look like data.
+   */
+  if (JS_IsArray(ctx, val) && type.typid != JSONOID &&
+      type.typid != JSONBOID) {
+    ereport(ERROR,
+            (errcode(ERRCODE_DATATYPE_MISMATCH),
+             errmsg("cannot convert a JavaScript array to %s",
+                    format_type_be(rettype)),
+             errdetail("pljs represents SQL arrays as one-dimensional JavaScript "
+                       "arrays; a nested array is only valid for json or "
+                       "jsonb.")));
   }
 
   if (type.category == TYPCATEGORY_ARRAY && !JS_IsArray(ctx, val)) {

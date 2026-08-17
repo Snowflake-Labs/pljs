@@ -109,3 +109,47 @@ DROP FUNCTION tstz_rt, date_rt, ts_subms_lost, inf_read, inf_write_null, id_jb;
 RESET timezone;
 RESET datestyle;
 RESET extra_float_digits;
+
+-- Multidimensional arrays: the two directions must agree.
+--
+-- Input already rejected a 2-D SQL array with a clear message.  Output did not
+-- reject anything -- it silently produced numbers that looked like data.  The
+-- conversion dispatched a JavaScript array to array-construction for *any*
+-- non-json target, so the element loop converted each inner array to the element
+-- type and returned the inner ArrayType pointer reinterpreted as int4:
+--
+--     RETURNS int[] with [[1,2],[3,4]]  ->  {357119344,357119392}
+--
+-- Both directions now raise.
+CREATE FUNCTION tm_md_in(v int[]) RETURNS int LANGUAGE pljs AS $$ return 1; $$;
+CREATE FUNCTION tm_md_out() RETURNS int[] LANGUAGE pljs AS $$ return [[1,2],[3,4]]; $$;
+
+SELECT tm_md_in('{{1,2},{3,4}}'::int[]);
+SELECT tm_md_out();
+
+-- A JavaScript array aimed at a scalar is the same mistake, one dimension down.
+CREATE FUNCTION tm_arr_scalar() RETURNS int LANGUAGE pljs AS $$ return [1,2]; $$;
+
+SELECT tm_arr_scalar();
+
+-- One-dimensional arrays are unaffected, in both directions.
+SELECT tm_md_in('{1,2,3}'::int[]) AS flat_input_ok;
+
+CREATE FUNCTION tm_flat_out() RETURNS int[] LANGUAGE pljs AS $$ return [1,2,3]; $$;
+
+SELECT tm_flat_out() AS flat_output;
+
+-- json and jsonb legitimately hold nested arrays and must keep working.
+CREATE FUNCTION tm_jsonb_nested() RETURNS jsonb LANGUAGE pljs AS $$ return [[1,2],[3,4]]; $$;
+CREATE FUNCTION tm_jsonb_arr() RETURNS jsonb[] LANGUAGE pljs AS $$ return [[1,2],[3]]; $$;
+
+SELECT tm_jsonb_nested() AS jsonb_keeps_nesting;
+SELECT tm_jsonb_arr() AS jsonb_array_of_arrays;
+
+DROP FUNCTION tm_md_in(int[]);
+DROP FUNCTION tm_md_out();
+DROP FUNCTION tm_arr_scalar();
+DROP FUNCTION tm_flat_out();
+DROP FUNCTION tm_jsonb_nested();
+DROP FUNCTION tm_jsonb_arr();
+
