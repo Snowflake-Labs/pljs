@@ -186,12 +186,12 @@ void pljs_guc_init(void) {
  * pljs.execute()/SPI boundary.
  *
  * OWNERSHIP: all three returned strings -- the return value, *message_out and
- * *detail_out -- are palloc'd in CurrentMemoryContext.  The caller must therefore
- * be in a context that outlives the JavaScript context teardown it is about to
- * perform; call_function() switches back to the caller's context before calling
- * this for exactly that reason.  Adding the two out-parameters silently turned
- * one palloc'd string into three, so this is worth stating rather than
- * rediscovering.
+ * *detail_out -- are palloc'd in CurrentMemoryContext.  The caller must
+ * therefore be in a context that outlives the JavaScript context teardown it is
+ * about to perform; call_function() switches back to the caller's context
+ * before calling this for exactly that reason.  Adding the two out-parameters
+ * silently turned one palloc'd string into three, so this is worth stating
+ * rather than rediscovering.
  */
 static char *dump_error(JSContext *ctx, char **message_out, char **detail_out) {
   JSValue exception_val, val;
@@ -315,13 +315,12 @@ static char *dump_error(JSContext *ctx, char **message_out, char **detail_out) {
  * empty message, and errmsg("%s", "") produces an error with no text at all.
  * Extracted so the next site to be added cannot forget it.
  *
- * `message` and `detail` are the out-parameters from dump_error(); `fallback` is
- * used when the exception carried no message of its own.  Does not return.
+ * `message` and `detail` are the out-parameters from dump_error(); `fallback`
+ * is used when the exception carried no message of its own.  Does not return.
  */
-pg_attribute_noreturn() static void pljs_ereport_js_error(const char *message,
-                                                          const char *pg_detail,
-                                                          const char *detail,
-                                                          const char *fallback) {
+pg_attribute_noreturn() static void pljs_ereport_js_error(
+    const char *message, const char *pg_detail, const char *detail,
+    const char *fallback) {
   ereport(ERROR,
           (errmsg("%s", (message && message[0]) ? message : fallback),
            errdetail("%s", (pg_detail && pg_detail[0]) ? pg_detail : detail)));
@@ -344,15 +343,15 @@ static int interrupt_handler(JSRuntime *rt, void *opaque) {
    */
   /*
    * QueryCancelPending and ProcDiePending are the two that matter most, and are
-   * kept as an explicit fast path.  InterruptPending then catches everything else
-   * PostgreSQL considers worth interrupting for -- ClientConnectionLost, recovery
-   * conflicts, IdleInTransactionSessionTimeoutPending -- so a runaway script
-   * unwinds for those too rather than spinning until one of the first two happens
-   * to be set.  Requested on the PR 7 review.
+   * kept as an explicit fast path.  InterruptPending then catches everything
+   * else PostgreSQL considers worth interrupting for -- ClientConnectionLost,
+   * recovery conflicts, IdleInTransactionSessionTimeoutPending -- so a runaway
+   * script unwinds for those too rather than spinning until one of the first
+   * two happens to be set.  Requested on the PR 7 review.
    *
    * A spurious wake-up is harmless: the caller runs CHECK_FOR_INTERRUPTS() once
-   * control is back in C, and if nothing is actually pending that is a no-op and
-   * the JavaScript exception is reported normally.
+   * control is back in C, and if nothing is actually pending that is a no-op
+   * and the JavaScript exception is reported normally.
    */
   return (QueryCancelPending || ProcDiePending || InterruptPending) ? 1 : 0;
 }
@@ -363,8 +362,8 @@ static int interrupt_handler(JSRuntime *rt, void *opaque) {
  * Prefers the type *this call* resolved to, falling back to the declared type
  * when no call expression is available (a validator, or a call with no
  * expression tree).  For a non-polymorphic argument the two are equal, so this
- * is only observable for a polymorphic declaration -- where the declared type is
- * a pseudo-type that cannot be converted at all.
+ * is only observable for a polymorphic declaration -- where the declared type
+ * is a pseudo-type that cannot be converted at all.
  *
  * This file previously overrode the declared type only
  * `if (fcinfo && IsPolymorphicType(argtype))`, at three separate sites, while
@@ -598,10 +597,11 @@ static void setup_start_proc(JSContext *ctx) {
     if (JS_IsException(ret)) {
       char *message = NULL, *pg_detail = NULL;
       char *detail = dump_error(ctx, &message, &pg_detail);
-      ereport(ERROR,
-              (errmsg("%s", (message && message[0]) ? message
-                                                     : "start proc execution error"),
-               errdetail("%s", (pg_detail && pg_detail[0]) ? pg_detail : detail)));
+      ereport(
+          ERROR,
+          (errmsg("%s", (message && message[0]) ? message
+                                                : "start proc execution error"),
+           errdetail("%s", (pg_detail && pg_detail[0]) ? pg_detail : detail)));
     }
   }
 }
@@ -1005,11 +1005,11 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
    *
    * -- with the syntax error surfacing only on the first call.
    *
-   * Correcting the OID is necessary but not sufficient: a pljs body is a function
-   * *body*, not a program, so `return 42;` is a syntax error at top level and
-   * validating the raw prosrc rejects almost every valid function.  It has to be
-   * wrapped the way compilation wraps it, which is why the source builder is
-   * shared with pljs_compile_function().
+   * Correcting the OID is necessary but not sufficient: a pljs body is a
+   * function *body*, not a program, so `return 42;` is a syntax error at top
+   * level and validating the raw prosrc rejects almost every valid function. It
+   * has to be wrapped the way compilation wraps it, which is why the source
+   * builder is shared with pljs_compile_function().
    */
   Oid fn_oid = PG_GETARG_OID(0);
   HeapTuple proctuple;
@@ -1033,8 +1033,7 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
     elog(ERROR, "cache lookup failed for function %u", fn_oid);
   }
 
-  is_trigger =
-      ((Form_pg_proc)GETSTRUCT(proctuple))->prorettype == TRIGGEROID;
+  is_trigger = ((Form_pg_proc)GETSTRUCT(proctuple))->prorettype == TRIGGEROID;
 
   ctx = JS_NewContext(rt);
 
@@ -1070,8 +1069,8 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
 
     /*
      * dump_error() has copied what we need into palloc'd memory, so release the
-     * JavaScript side before reporting.  Without this a rejected body leaked the
-     * whole context: JS_FreeContext() will not free one that still has live
+     * JavaScript side before reporting.  Without this a rejected body leaked
+     * the whole context: JS_FreeContext() will not free one that still has live
      * references into it.
      */
     JS_FreeValue(ctx, val);
@@ -1090,8 +1089,8 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
    *
    * This was previously a blanket pljs_cache_reset(), which destroys every
    * per-user JSContext and rebuilds it on the next call.  JS_FreeContext() will
-   * not free a context that still has live references into it, so the old one was
-   * not necessarily reclaimed and a backend doing repeated DDL grew without
+   * not free a context that still has live references into it, so the old one
+   * was not necessarily reclaimed and a backend doing repeated DDL grew without
    * bound.
    */
   pljs_cache_function_remove(fn_oid);
@@ -1113,19 +1112,20 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
  */
 /*
  * Build the JavaScript source for a pljs function: its body wrapped in a named
- * function with the declared argument names, followed by a reference to it so the
- * evaluation yields the function object.
+ * function with the declared argument names, followed by a reference to it so
+ * the evaluation yields the function object.
  *
  * Extracted so that pljs_call_validator() can check exactly what
- * pljs_compile_function() will later compile.  A pljs body is a function *body*,
- * not a program -- `return 42;` is a syntax error at top level -- so validating
- * the raw prosrc rejects almost every valid function.  Sharing this makes the two
- * agree by construction rather than by two copies staying in step.
+ * pljs_compile_function() will later compile.  A pljs body is a function
+ * *body*, not a program -- `return 42;` is a syntax error at top level -- so
+ * validating the raw prosrc rejects almost every valid function.  Sharing this
+ * makes the two agree by construction rather than by two copies staying in
+ * step.
  *
  * The returned StringInfo's data is palloc'd; the caller frees it.
  */
-static void pljs_build_function_source(StringInfoData *src, pljs_context *context,
-                                       bool is_trigger) {
+static void pljs_build_function_source(StringInfoData *src,
+                                       pljs_context *context, bool is_trigger) {
   int i;
 
   initStringInfo(src);
@@ -1161,7 +1161,7 @@ static void pljs_build_function_source(StringInfoData *src, pljs_context *contex
 
   if (is_trigger) {
     appendStringInfo(src, "NEW, OLD, TG_NAME, TG_WHEN, TG_LEVEL, TG_OP, "
-                           "TG_RELID, TG_TABLE_NAME, TG_TABLE_SCHEMA, TG_ARGV");
+                          "TG_RELID, TG_TABLE_NAME, TG_TABLE_SCHEMA, TG_ARGV");
   }
 
   appendStringInfo(src, ") {\n%s\n}\n %s;\n", context->function->prosrc,
@@ -1219,8 +1219,8 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
     /*
      * Extract the error, release everything, then report.  The report never
      * returns, so anything freed after it is dead code -- and `val` was never
-     * released on this path at all, leaking a QuickJS reference for every failed
-     * DO block.
+     * released on this path at all, leaking a QuickJS reference for every
+     * failed DO block.
      */
     char *message = NULL, *pg_detail = NULL;
     char *detail = dump_error(ctx, &message, &pg_detail);
@@ -1462,7 +1462,8 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
        * been registered", which is an unhelpful way to say "you forgot
        * AS (a int, b text)".
        */
-      if (get_call_result_type(fcinfo, &rettype, &tupdesc) != TYPEFUNC_COMPOSITE) {
+      if (get_call_result_type(fcinfo, &rettype, &tupdesc) !=
+          TYPEFUNC_COMPOSITE) {
         ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                  errmsg("a function returning \"record\" needs a column "
@@ -1488,7 +1489,7 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
 
       if (record_is_null) {
         fcinfo->isnull = true;
-        datum = (Datum) 0;
+        datum = (Datum)0;
       }
     } else {
       bool is_null;
@@ -1629,8 +1630,8 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
                 NULL, val, &nulls, state->tuple_desc, context->ctx);
 
             if (values != NULL) {
-              tuplestore_putvalues(state->tuple_store_state,
-                                   state->tuple_desc, values, nulls);
+              tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
+                                   values, nulls);
               pfree(values);
             }
             pfree(nulls);
@@ -1645,8 +1646,8 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
               NULL, ret, &nulls, state->tuple_desc, context->ctx);
 
           if (values != NULL) {
-            tuplestore_putvalues(state->tuple_store_state,
-                                 state->tuple_desc, values, nulls);
+            tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
+                                 values, nulls);
             pfree(values);
           }
           pfree(nulls);
@@ -1734,8 +1735,8 @@ JSValue js_throw_error_data(ErrorData *edata, JSContext *ctx) {
    * The value has always been the five-character string rather than the packed
    * integer -- unpack_sql_state() is applied here -- but the property was named
    * `sqlerrcode`, which is PostgreSQL's internal name for the *packed* form.
-   * Every other PL calls it `sqlstate`, and that is the name a JavaScript author
-   * reaches for:
+   * Every other PL calls it `sqlstate`, and that is the name a JavaScript
+   * author reaches for:
    *
    *     catch (e) { if (e.sqlstate === '23505') ... }
    *
@@ -1791,8 +1792,8 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
      * This is a pg_language tuple, so it must be read through
      * Form_pg_language.  It was previously cast to Form_pg_database, which
      * happened to yield the right answer only because both catalogs begin with
-     * an `Oid oid` at the same offset -- any future field access, or a change to
-     * either catalog's layout, would have read the wrong bytes.
+     * an `Oid oid` at the same offset -- any future field access, or a change
+     * to either catalog's layout, would have read the wrong bytes.
      */
     Form_pg_language langForm = (Form_pg_language)GETSTRUCT(langtuple);
     Oid langtupoid = langForm->oid;
@@ -1817,11 +1818,11 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
 
     /*
      * The pin was previously released only on the cache-miss branch below, so a
-     * pljs.find_function() that hit the cache -- the common case once a function
-     * has been called once -- held a syscache pin on pg_proc for the rest of the
-     * transaction.  Repeated lookups in one transaction accumulated them, which
-     * is what produces "WARNING: resource was not closed: cache pg_proc ... has
-     * count N" under USE_ASSERT_CHECKING.
+     * pljs.find_function() that hit the cache -- the common case once a
+     * function has been called once -- held a syscache pin on pg_proc for the
+     * rest of the transaction.  Repeated lookups in one transaction accumulated
+     * them, which is what produces "WARNING: resource was not closed: cache
+     * pg_proc ... has count N" under USE_ASSERT_CHECKING.
      */
     ReleaseSysCache(functuple);
   } else {

@@ -582,11 +582,11 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
     /*
      * Surface bytea as a Uint8Array, not a string.
      *
-     * JS_NewStringLen() decodes its input as UTF-8, so any byte sequence that is
-     * not valid UTF-8 was replaced with U+FFFD and the original bytes were gone
-     * for good -- not merely re-encoded.  decode('deadbeef','hex') arrived in
-     * JavaScript as a *two* character string and wrote back as `deadefbfbd`, and
-     * every 0xFF byte became efbfbd.  Any bytea that is not plain ASCII was
+     * JS_NewStringLen() decodes its input as UTF-8, so any byte sequence that
+     * is not valid UTF-8 was replaced with U+FFFD and the original bytes were
+     * gone for good -- not merely re-encoded.  decode('deadbeef','hex') arrived
+     * in JavaScript as a *two* character string and wrote back as `deadefbfbd`,
+     * and every 0xFF byte became efbfbd.  Any bytea that is not plain ASCII was
      * silently destroyed by a round-trip through JS.
      *
      * A Uint8Array carries the bytes exactly, indexes and has .length like the
@@ -621,9 +621,9 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
      * NB: js_typed_array_constructor() reads argv[1] (byteOffset) and argv[2]
      * (length) *unconditionally*, without consulting argc.  Passing a
      * one-element argv therefore reads two elements past the array, and
-     * whatever happens to be on the stack becomes the offset and length -- which
-     * is why an earlier attempt at this produced a zero-length view and was
-     * abandoned in favour of the global lookup.  Pass all three explicitly.
+     * whatever happens to be on the stack becomes the offset and length --
+     * which is why an earlier attempt at this produced a zero-length view and
+     * was abandoned in favour of the global lookup.  Pass all three explicitly.
      */
     JSValueConst ta_args[3] = {buffer, JS_UNDEFINED, JS_UNDEFINED};
 
@@ -633,8 +633,8 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
 
     /*
      * A large bytea can exhaust pljs.memory_limit here.  The result was
-     * previously handed back unchecked, so the exception JSValue was stored into
-     * argv[] and passed to JS_Call() as if it were a value.
+     * previously handed back unchecked, so the exception JSValue was stored
+     * into argv[] and passed to JS_Call() as if it were a value.
      */
     if (JS_IsException(return_result)) {
       if (p != (struct varlena *)DatumGetPointer(arg)) {
@@ -643,7 +643,8 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
       return return_result;
     }
 
-    /* PG_DETOAST_DATUM_PACKED only allocates when it actually had to detoast. */
+    /* PG_DETOAST_DATUM_PACKED only allocates when it actually had to detoast.
+     */
     if (p != (struct varlena *)DatumGetPointer(arg)) {
       pfree(p);
     }
@@ -982,7 +983,8 @@ Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
 
     JSValue o = JS_GetPropertyStr(ctx, val, colname);
 
-    /* Owned reference: release it on both paths.  See pljs_jsvalue_to_datums(). */
+    /* Owned reference: release it on both paths.  See pljs_jsvalue_to_datums().
+     */
     if (JS_IsNull(o) || JS_IsUndefined(o)) {
       nulls[c] = true;
       JS_FreeValue(ctx, o);
@@ -1157,14 +1159,14 @@ static Datum pljs_string_to_datum_via_input(Oid typid, JSValueConst val,
  * @brief Raises the standard out-of-range error for an integer target type.
  */
 static void pljs_int_out_of_range(Oid typid) {
-  ereport(ERROR, (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-                  errmsg("value is out of range for type %s",
-                         format_type_be(typid))));
+  ereport(ERROR,
+          (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+           errmsg("value is out of range for type %s", format_type_be(typid))));
 }
 
 /**
- * @brief Converts a JavaScript number to an integer, rejecting values the target
- * type cannot represent.
+ * @brief Converts a JavaScript number to an integer, rejecting values the
+ * target type cannot represent.
  *
  * QuickJS's JS_ToInt32/JS_ToInt64 wrap modulo the word size, so 2147483648
  * silently became -2147483648, 40000 became -25536 for a smallint, and NaN and
@@ -1190,9 +1192,9 @@ static int64 pljs_number_to_int_checked(JSContext *ctx, JSValueConst val,
   }
 
   if (isnan(d)) {
-    ereport(ERROR, (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-                    errmsg("cannot convert NaN to type %s",
-                           format_type_be(typid))));
+    ereport(ERROR,
+            (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+             errmsg("cannot convert NaN to type %s", format_type_be(typid))));
   }
 
   if (isinf(d)) {
@@ -1297,7 +1299,7 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
         *is_null = true;
       }
 
-      return (Datum) 0;
+      return (Datum)0;
     }
   }
 
@@ -1325,11 +1327,11 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
    * A JavaScript array aimed at something that is not an array type and not
    * json/jsonb.
    *
-   * This used to dispatch to pljs_jsvalue_to_array() anyway -- the old condition
-   * was "not json/jsonb", which is true of every scalar -- so it built an array
-   * Datum and handed it back as if it were the scalar.  For a *nested* array
-   * inside an array that is silent corruption rather than an error: the element
-   * loop converts each element to the element type, so
+   * This used to dispatch to pljs_jsvalue_to_array() anyway -- the old
+   * condition was "not json/jsonb", which is true of every scalar -- so it
+   * built an array Datum and handed it back as if it were the scalar.  For a
+   * *nested* array inside an array that is silent corruption rather than an
+   * error: the element loop converts each element to the element type, so
    * `return [[1,2],[3,4]]` for int[] produced {357119344,357119392} -- the
    * ArrayType pointers of the two inner arrays, reinterpreted as int4.
    *
@@ -1337,15 +1339,15 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
    * message; this makes the output direction agree instead of producing numbers
    * that look like data.
    */
-  if (JS_IsArray(ctx, val) && type.typid != JSONOID &&
-      type.typid != JSONBOID) {
-    ereport(ERROR,
-            (errcode(ERRCODE_DATATYPE_MISMATCH),
-             errmsg("cannot convert a JavaScript array to %s",
-                    format_type_be(rettype)),
-             errdetail("pljs represents SQL arrays as one-dimensional JavaScript "
-                       "arrays; a nested array is only valid for json or "
-                       "jsonb.")));
+  if (JS_IsArray(ctx, val) && type.typid != JSONOID && type.typid != JSONBOID) {
+    ereport(
+        ERROR,
+        (errcode(ERRCODE_DATATYPE_MISMATCH),
+         errmsg("cannot convert a JavaScript array to %s",
+                format_type_be(rettype)),
+         errdetail("pljs represents SQL arrays as one-dimensional JavaScript "
+                   "arrays; a nested array is only valid for json or "
+                   "jsonb.")));
   }
 
   if (type.category == TYPCATEGORY_ARRAY && !JS_IsArray(ctx, val)) {
@@ -1399,13 +1401,15 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     }
 
     /*
-     * An object-wrapped primitive is not JS_IsString(), so `new String("false")`
-     * skipped the branch above and fell through to JS_ToBool() -- which reports
-     * every object as true, reintroducing exactly the inversion this case exists
-     * to prevent.  Unwrap it and take the string path.
+     * An object-wrapped primitive is not JS_IsString(), so `new
+     * String("false")` skipped the branch above and fell through to JS_ToBool()
+     * -- which reports every object as true, reintroducing exactly the
+     * inversion this case exists to prevent.  Unwrap it and take the string
+     * path.
      *
-     * Only String objects are unwrapped: a general JS_ToString() here would also
-     * stringify arbitrary objects and arrays, so `{}` would become the text
+     * Only String objects are unwrapped: a general JS_ToString() here would
+     * also stringify arbitrary objects and arrays, so `{}` would become the
+     * text
      * "[object Object]" and then raise from boolin, where JS_ToBool()'s
      * truthiness is at least the documented JavaScript behaviour for those.
      */
@@ -1533,8 +1537,9 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     }
 
     if (JS_ToFloat64(ctx, &in, val) < 0) {
-      ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-                      errmsg("could not convert JavaScript value to a number")));
+      ereport(ERROR,
+              (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+               errmsg("could not convert JavaScript value to a number")));
     }
 
     /*
@@ -1545,10 +1550,10 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
      * too large to represent is rejected.
      */
     if (!isnan(in) && !isinf(in) && isinf((float4)in)) {
-      ereport(ERROR, (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-                      errmsg("value out of range: overflow"),
-                      errdetail("Value %g cannot be represented as type real.",
-                                in)));
+      ereport(ERROR,
+              (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+               errmsg("value out of range: overflow"),
+               errdetail("Value %g cannot be represented as type real.", in)));
     }
 
     PG_RETURN_FLOAT4((float4)in);
@@ -1621,13 +1626,15 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     const char *str = JS_ToCStringLen(ctx, &plen, val);
 
     if (str == NULL) {
-      ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-                    errmsg("could not convert JavaScript value to a string")));
+      ereport(ERROR,
+              (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+               errmsg("could not convert JavaScript value to a string")));
     }
 
     /*
-     * A PostgreSQL text value cannot contain an embedded NUL.  CStringGetTextDatum
-     * uses strlen(), which would silently truncate a JS string at its first
+     * A PostgreSQL text value cannot contain an embedded NUL.
+     * CStringGetTextDatum uses strlen(), which would silently truncate a JS
+     * string at its first
      * \u0000 -- turning "a\u0000b" into "a" and losing data without warning.
      * Detect the NUL and raise a clear error instead of corrupting the value.
      */
@@ -1639,13 +1646,13 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     }
 
     /*
-     * JS_ToCStringLen() hands back UTF-8, but neither cstring_to_text_with_len()
-     * nor the CStringGetTextDatum() it replaced validates against the *server*
-     * encoding.  On a LATIN1 or SQL_ASCII database a JavaScript string holding
-     * non-ASCII characters therefore stored raw UTF-8 bytes into a column
-     * declared to hold something else -- accepted silently, and then a pg_dump
-     * that will not restore.  Same silent-corruption class as the NUL
-     * truncation above.
+     * JS_ToCStringLen() hands back UTF-8, but neither
+     * cstring_to_text_with_len() nor the CStringGetTextDatum() it replaced
+     * validates against the *server* encoding.  On a LATIN1 or SQL_ASCII
+     * database a JavaScript string holding non-ASCII characters therefore
+     * stored raw UTF-8 bytes into a column declared to hold something else --
+     * accepted silently, and then a pg_dump that will not restore.  Same
+     * silent-corruption class as the NUL truncation above.
      *
      * pg_any_to_server() converts UTF-8 to the server encoding and raises
      * ERRCODE_UNTRANSLATABLE_CHARACTER for a character the target cannot
@@ -1658,7 +1665,8 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     if (converted == str) {
       ret = PointerGetDatum(cstring_to_text_with_len(str, plen));
     } else {
-      ret = PointerGetDatum(cstring_to_text_with_len(converted, strlen(converted)));
+      ret = PointerGetDatum(
+          cstring_to_text_with_len(converted, strlen(converted)));
       pfree(converted);
     }
     JS_FreeCString(ctx, str);
@@ -1683,9 +1691,8 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
      */
     if (str == NULL) {
       JSValue exc = JS_GetException(ctx);
-      const char *msg = JS_IsNull(exc) || JS_IsUndefined(exc)
-                            ? NULL
-                            : JS_ToCString(ctx, exc);
+      const char *msg =
+          JS_IsNull(exc) || JS_IsUndefined(exc) ? NULL : JS_ToCString(ctx, exc);
       char *detail = msg ? pstrdup(msg) : NULL;
 
       if (msg) {
@@ -1749,9 +1756,9 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
      * covered only Int8/Uint8, Int16/Uint16 and Int32/Uint32.  The other five
      * typed-array types -- Uint8ClampedArray, Float32Array, Float64Array,
      * BigInt64Array and BigUint64Array -- matched no branch at all and fell
-     * through to the error below, so `return new Float64Array([1.5])` for a bytea
-     * column could not work.  (Before unhandled values started raising, they
-     * silently produced SQL NULL instead, which is why it went unnoticed.)
+     * through to the error below, so `return new Float64Array([1.5])` for a
+     * bytea column could not work.  (Before unhandled values started raising,
+     * they silently produced SQL NULL instead, which is why it went unnoticed.)
      *
      * JS_GetTypedArrayBuffer() reports the view's byteOffset and byteLength, so
      * an offset view such as `new Uint8Array(buf, 4, 2)` copies those two bytes
@@ -1863,15 +1870,18 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
       Datum ret;
 
       if (str == NULL) {
-        ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-                    errmsg("could not convert JavaScript value to a string")));
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                 errmsg("could not convert JavaScript value to a string")));
       }
 
       if (memchr(str, '\0', plen) != NULL) {
         JS_FreeCString(ctx, str);
-        ereport(ERROR,
-                (errcode(ERRCODE_UNTRANSLATABLE_CHARACTER),
-                 errmsg("null byte (\\u0000) is not allowed in a date/time value")));
+        ereport(
+            ERROR,
+            (errcode(ERRCODE_UNTRANSLATABLE_CHARACTER),
+             errmsg(
+                 "null byte (\\u0000) is not allowed in a date/time value")));
       }
 
       getTypeInputInfo(rettype, &typinput, &typioparam);
@@ -2235,8 +2245,8 @@ static JsonbValue *jsonb_array_from_array(JSValue array,
  *
  * The ancestor set is therefore purely for cycle detection, and grows on demand
  * instead of being a fixed 1.6 kB stack array.  It is palloc'd in the caller's
- * conversion context, which convert_object() deletes on both the success and the
- * error path, so an ereport out of here does not leak it.
+ * conversion context, which convert_object() deletes on both the success and
+ * the error path, so an ereport out of here does not leak it.
  */
 struct pljs_jsonb_state {
   void **ancestors;
@@ -2245,8 +2255,8 @@ struct pljs_jsonb_state {
 };
 
 /*
- * Push `value` onto the ancestor stack, raising if it is already there (a cycle)
- * or if we are running out of C stack.
+ * Push `value` onto the ancestor stack, raising if it is already there (a
+ * cycle) or if we are running out of C stack.
  */
 static void pljs_jsonb_enter(JSValueConst value,
                              struct pljs_jsonb_state *state) {
@@ -2269,10 +2279,10 @@ static void pljs_jsonb_enter(JSValueConst value,
     int newcap = state->capacity ? state->capacity * 2 : 32;
 
     if (state->ancestors == NULL) {
-      state->ancestors = (void **) palloc(sizeof(void *) * newcap);
+      state->ancestors = (void **)palloc(sizeof(void *) * newcap);
     } else {
       state->ancestors =
-          (void **) repalloc(state->ancestors, sizeof(void *) * newcap);
+          (void **)repalloc(state->ancestors, sizeof(void *) * newcap);
     }
 
     state->capacity = newcap;
@@ -2547,14 +2557,15 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
   // Get the keys of the `Object`.
   if (JS_GetOwnPropertyNames(ctx, &tab, &object_keys_length, object,
                              JS_GPN_STRING_MASK) < 0) {
-    ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-                    errmsg("could not enumerate JavaScript object properties")));
+    ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("could not enumerate JavaScript object properties")));
   }
 
   /*
    * From here to the free below this frame owns `tab` and every atom in it, and
-   * anything we descend into can raise: a circular structure, exhausted C stack,
-   * a failed conversion.  Those longjmp straight past this frame, and
+   * anything we descend into can raise: a circular structure, exhausted C
+   * stack, a failed conversion.  Those longjmp straight past this frame, and
    * convert_object()'s PG_CATCH can delete the PostgreSQL context but cannot
    * free QuickJS allocations -- so without this guard a function returning a
    * circular object leaked a table plus one atom reference per key, per nesting
@@ -2576,10 +2587,10 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
       current = o;
 
       /*
-       * JSON.stringify() omits function-valued properties entirely; do the same.
-       * Beyond matching JSON semantics this avoids descending into a function's
-       * `prototype`, whose `constructor` points back at the function -- an
-       * unbounded recursion that used to crash the backend.
+       * JSON.stringify() omits function-valued properties entirely; do the
+       * same. Beyond matching JSON semantics this avoids descending into a
+       * function's `prototype`, whose `constructor` points back at the function
+       * -- an unbounded recursion that used to crash the backend.
        */
       if (JS_IsFunction(ctx, o)) {
         JS_FreeValue(ctx, o);
@@ -2650,7 +2661,8 @@ static Jsonb *convert_object(JSValue object, JSContext *ctx) {
 
   JsonbBuildState parse_state = {0};
   JsonbValue *volatile value = NULL;
-  struct pljs_jsonb_state state = {.ancestors = NULL, .depth = 0, .capacity = 0};
+  struct pljs_jsonb_state state = {
+      .ancestors = NULL, .depth = 0, .capacity = 0};
 
   /*
    * The conversion can now raise (circular structure, nesting limit, a numeric
@@ -2664,29 +2676,30 @@ static Jsonb *convert_object(JSValue object, JSContext *ctx) {
     if (JS_IsArray(ctx, object)) {
       value = jsonb_array_from_array(object, &parse_state, ctx, &state);
     } else if (Is_Date(object) || JS_IsFunction(ctx, object)) {
-    /*
-     * A top-level Date renders as its ISO string and a top-level function as
-     * JSON null (JSON.stringify semantics); both must bypass the object branch,
-     * which would produce `{}` for a Date and recurse into a function forever.
-     */
-    jsonb_push(&parse_state, WJB_BEGIN_ARRAY, NULL);
-    if (JS_IsFunction(ctx, object)) {
-      JsonbValue null_val = {.type = jbvNull};
+      /*
+       * A top-level Date renders as its ISO string and a top-level function as
+       * JSON null (JSON.stringify semantics); both must bypass the object
+       * branch, which would produce `{}` for a Date and recurse into a function
+       * forever.
+       */
+      jsonb_push(&parse_state, WJB_BEGIN_ARRAY, NULL);
+      if (JS_IsFunction(ctx, object)) {
+        JsonbValue null_val = {.type = jbvNull};
 
-      jsonb_push(&parse_state, WJB_ELEM, &null_val);
+        jsonb_push(&parse_state, WJB_ELEM, &null_val);
+      } else {
+        jsonb_from_value(object, &parse_state, WJB_ELEM, ctx, NULL);
+      }
+      value = jsonb_push(&parse_state, WJB_END_ARRAY, NULL);
+      value->val.array.rawScalar = true;
+    } else if (JS_IsObject(object)) {
+      value = jsonb_object_from_object(object, &parse_state, ctx, &state);
     } else {
+      jsonb_push(&parse_state, WJB_BEGIN_ARRAY, NULL);
       jsonb_from_value(object, &parse_state, WJB_ELEM, ctx, NULL);
+      value = jsonb_push(&parse_state, WJB_END_ARRAY, NULL);
+      value->val.array.rawScalar = true;
     }
-    value = jsonb_push(&parse_state, WJB_END_ARRAY, NULL);
-    value->val.array.rawScalar = true;
-  } else if (JS_IsObject(object)) {
-    value = jsonb_object_from_object(object, &parse_state, ctx, &state);
-  } else {
-    jsonb_push(&parse_state, WJB_BEGIN_ARRAY, NULL);
-    jsonb_from_value(object, &parse_state, WJB_ELEM, ctx, NULL);
-    value = jsonb_push(&parse_state, WJB_END_ARRAY, NULL);
-    value->val.array.rawScalar = true;
-  }
   }
   PG_CATCH();
   {
