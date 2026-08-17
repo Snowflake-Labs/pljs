@@ -197,13 +197,19 @@ for commit in $(git rev-list --reverse "$BASE..HEAD"); do
   #       the *file*, which is not always the commit that introduces the behaviour.
   #       A refactor that ships a test for behaviour added three commits earlier will
   #       always look non-discriminating here.
+  # Match against the header with comment markers stripped, newlines folded and runs
+  # of whitespace collapsed, case-insensitively.  The markers are prose in a wrapped
+  # SQL comment, so the literal phrase is split across lines and prefixed with "--";
+  # matching the raw text finds nothing, which is how these five silently went back to
+  # being reported as problems.
   is_coverage=0
   for t in "${tests[@]}"; do
-    head_src="$(git show "$ORIGINAL_HEAD:sql/$t.sql" 2>/dev/null)"
-    case "$head_src" in
-      *"not a discriminating regression test"*|*"discriminates against an earlier commit"*|*"strengthened after the commit that introduced it"*)
-        is_coverage=1 ;;
-    esac
+    head_src="$(git show "$ORIGINAL_HEAD:sql/$t.sql" 2>/dev/null \
+                | sed 's/^[[:space:]]*--[[:space:]]*//' | tr '\n' ' ' | tr -s '[:space:]' ' ')"
+    if printf '%s' "$head_src" | grep -qiE \
+         'not a discriminating regression test|discriminates against an earlier commit|strengthened after the commit that introduced it'; then
+      is_coverage=1
+    fi
   done
 
   if [ "$with" != "passed" ]; then

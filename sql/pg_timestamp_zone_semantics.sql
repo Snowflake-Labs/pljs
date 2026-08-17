@@ -18,6 +18,11 @@
 --     regardless of the session TimeZone, and writing that Date back stores 12:00
 --     again.  Self-consistent, and lossless in both directions.
 --
+-- NB for tools/check-test-discrimination.sh: this is not a discriminating
+-- regression test, and cannot be.  It pins behaviour that is deliberately
+-- unchanged, so there is no fix to revert -- its value is that a future change to
+-- either conversion path has to update it and thereby acknowledge the semantics.
+--
 -- We are deliberately not changing this. There is no timezone to apply to an
 -- unzoned value without inventing one, presenting the wall clock through the UTC
 -- accessors is the only mapping that round-trips, and it is what plv8 does -- so
