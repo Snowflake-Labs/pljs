@@ -88,3 +88,60 @@ DROP FUNCTION bind_date_ok();
 DROP FUNCTION bind_ts_bad();
 DROP FUNCTION bind_bytea_bad();
 DROP FUNCTION bind_bytea_ok();
+-- A JavaScript string must be converted to the SERVER encoding, not stored as raw
+-- UTF-8.
+--
+-- JS_ToCStringLen() returns UTF-8, and neither cstring_to_text_with_len() nor the
+-- CStringGetTextDatum() it replaced validates against the server encoding, so on a
+-- non-UTF8 database a non-ASCII JavaScript string was stored as raw UTF-8 bytes
+-- into a column declared to hold something else -- accepted silently, and then a
+-- pg_dump that will not restore.
+--
+-- This file runs in the regression database, which is UTF8, so it can only assert
+-- the pass-through half: conversion must be byte-exact and must not corrupt or
+-- re-encode anything when source and server encoding already agree.
+--
+-- The failing half needs a non-UTF8 database, which pg_regress cannot create
+-- per-file.  Measured by hand on a LATIN1 database (PostgreSQL 17):
+--
+--     'hello' with an e-acute   before: 6 bytes 68c3a96c6c6f  (raw UTF-8)
+--                                after: 5 bytes 68e96c6c6f    (correct LATIN1)
+--     a string containing U+4E2D before: stored as 61e4b8ad2062 (unrestorable)
+--                                after: raises "character with byte sequence
+--                                       0xe4 0xb8 0xad in encoding UTF8 has no
+--                                       equivalent in encoding LATIN1"
+SELECT current_setting('server_encoding') AS server_encoding;
+ server_encoding 
+-----------------
+ UTF8
+(1 row)
+
+CREATE FUNCTION cf_text(v text) RETURNS text LANGUAGE pljs AS $$ return v; $$;
+-- Byte-exact round trip for multibyte input, so the added conversion step cannot
+-- have introduced re-encoding on the common path.
+SELECT cf_text(u&'h\00E9llo') = u&'h\00E9llo' AS latin1_range_roundtrips,
+       octet_length(cf_text(u&'h\00E9llo')) AS bytes;
+ latin1_range_roundtrips | bytes 
+-------------------------+-------
+ t                       |     6
+(1 row)
+
+SELECT cf_text(u&'\4E2D\6587') = u&'\4E2D\6587' AS cjk_roundtrips,
+       octet_length(cf_text(u&'\4E2D\6587')) AS cjk_bytes;
+ cjk_roundtrips | cjk_bytes 
+----------------+-----------
+ t              |         6
+(1 row)
+
+-- A string built in JavaScript rather than passed through.
+CREATE FUNCTION cf_built() RETURNS text LANGUAGE pljs AS $$
+  return String.fromCharCode(0x68, 0xE9, 0x4E2D);
+$$;
+SELECT length(cf_built()) AS chars, octet_length(cf_built()) AS bytes;
+ chars | bytes 
+-------+-------
+     3 |     6
+(1 row)
+
+DROP FUNCTION cf_text(text);
+DROP FUNCTION cf_built();

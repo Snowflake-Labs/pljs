@@ -4,6 +4,7 @@
 #include "executor/spi.h"
 #include "fmgr.h"
 #include "funcapi.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "parser/parse_coerce.h"
 #include "utils/array.h"
@@ -1612,7 +1613,29 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
                errmsg("null byte (\\u0000) is not allowed in a text value")));
     }
 
-    Datum ret = PointerGetDatum(cstring_to_text_with_len(str, plen));
+    /*
+     * JS_ToCStringLen() hands back UTF-8, but neither cstring_to_text_with_len()
+     * nor the CStringGetTextDatum() it replaced validates against the *server*
+     * encoding.  On a LATIN1 or SQL_ASCII database a JavaScript string holding
+     * non-ASCII characters therefore stored raw UTF-8 bytes into a column
+     * declared to hold something else -- accepted silently, and then a pg_dump
+     * that will not restore.  Same silent-corruption class as the NUL
+     * truncation above.
+     *
+     * pg_any_to_server() converts UTF-8 to the server encoding and raises
+     * ERRCODE_UNTRANSLATABLE_CHARACTER for a character the target cannot
+     * represent.  When the server is already UTF-8 it returns its input pointer
+     * unchanged, so the common case costs nothing.
+     */
+    char *converted = pg_any_to_server(str, plen, PG_UTF8);
+    Datum ret;
+
+    if (converted == str) {
+      ret = PointerGetDatum(cstring_to_text_with_len(str, plen));
+    } else {
+      ret = PointerGetDatum(cstring_to_text_with_len(converted, strlen(converted)));
+      pfree(converted);
+    }
     JS_FreeCString(ctx, str);
 
     return ret;
