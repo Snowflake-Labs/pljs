@@ -208,6 +208,14 @@ These are not data-format changes, but they alter how a backend behaves.
   until you next `CREATE OR REPLACE` them, at which point the DDL fails where it
   previously succeeded. `check_function_bodies = off` skips validation, as it always
   has, so dump/restore is unaffected.
+- **Nested `pljs.execute()` no longer runs out of stack early.** QuickJS's stack
+  budget was measured from an anchor taken in `_PG_init` -- the shallowest point in
+  the backend -- so at any nested depth it believed it was nearer the end of the
+  stack than it was, and rejected work with `stack overflow` while plenty of stack
+  remained. Measured: a function recursing through `pljs.execute()` failed at depth
+  250 and now succeeds past 300, with deep nesting bounded by PostgreSQL's own
+  `max_stack_depth` instead. Pure-JS recursion is unchanged and still raises
+  catchably.
 - **A trigger can now use SPI.** `call_trigger()` never connected to SPI, so
   `pljs.execute()`, `pljs.prepare()` and cursors all failed inside a trigger
   function -- not only DDL, but a bare `pljs.execute("SELECT 1")`. Querying from a
