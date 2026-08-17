@@ -49,6 +49,12 @@ SELECT bytea_length(decode(repeat('ab', 20000), 'hex')) AS big_len;
 -- For completeness: user code that calls `new Uint8Array` itself still gets
 -- whatever the global says, which is the caller's own doing and not something
 -- pljs should override.  Only pljs's own marshalling is protected.
+--
+-- NB: this used to report "constructed", because every CREATE FUNCTION blew away
+-- the whole context cache and with it the poisoned global.  Now that a DDL
+-- invalidates only the function it replaces, the context persists as it does in a
+-- real session -- so the pollution survives, which is what makes the boundary
+-- visible at all.  The reset was masking it.
 CREATE FUNCTION user_constructs_one() RETURNS text AS $$
   try { new Uint8Array(1); return 'constructed'; }
   catch (e) { return 'user-visible global still hijacked: ' + e.message; }

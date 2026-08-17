@@ -72,15 +72,21 @@ PGOPTIONS_ARG=""
 
 : > /tmp/pljs_mm_pgbench.log
 echo "pljs-memory-matrix: phase 1 -- pgbench mixed workload"
-# DDL churn is opt-in.  It reproduces a known, still-unfixed leak in the
-# CREATE OR REPLACE FUNCTION path (present on stock upstream too): a tight loop
-# reaches ~500MB RSS and then SIGSEGV in seconds.  Including it by default would
-# leave this tool permanently red and therefore useless as a gate, so it lives
-# behind MM_DDL_CHURN=1 -- which doubles as the reproducer.
-CHURN_ARG=()
-if [ "${MM_DDL_CHURN:-0}" = "1" ]; then
-  echo "pljs-memory-matrix: DDL churn ENABLED (reproduces the known validator/cache leak)"
-  CHURN_ARG=(-f "$SQLDIR/churn.sql@2")
+# DDL churn is now ON by default.
+#
+# It used to be opt-in because it reproduced an unfixed leak in the
+# CREATE OR REPLACE FUNCTION path -- a tight loop reached ~500MB RSS and then
+# SIGSEGV in seconds, on stock upstream too -- and a permanently red tool is not a
+# gate.  That leak is fixed (the validator no longer resets the whole context cache
+# on every DDL), so the reproducer becomes a regression gate: measured on
+# PostgreSQL 17 it now peaks at ~20MB instead of crashing.
+#
+# MM_DDL_CHURN=0 turns it off, for bisecting against a build that still has the
+# leak.
+CHURN_ARG=(-f "$SQLDIR/churn.sql@2")
+if [ "${MM_DDL_CHURN:-1}" = "0" ]; then
+  echo "pljs-memory-matrix: DDL churn disabled by MM_DDL_CHURN=0"
+  CHURN_ARG=()
 fi
 
 PGAPPNAME="$APP" PGOPTIONS="$PGOPTIONS_ARG" pgbench \

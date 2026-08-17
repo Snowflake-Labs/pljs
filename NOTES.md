@@ -200,6 +200,21 @@ These are not data-format changes, but they alter how a backend behaves.
 - **`pljs.memory_limit` applies at runtime.** `SET` previously changed the GUC
   without reaching the live interpreter. Lowering it below current usage does not
   reclaim anything — the next allocation fails with a JavaScript "out of memory".
+- **An invalid function body is now rejected at `CREATE FUNCTION` time.** The
+  validator was reading its own OID rather than the OID of the function being
+  created, so it compiled the string `pljs_call_validator` -- which is a valid
+  JavaScript identifier -- and accepted everything. A syntax error therefore only
+  appeared on the first call. Existing functions with invalid bodies are unaffected
+  until you next `CREATE OR REPLACE` them, at which point the DDL fails where it
+  previously succeeded. `check_function_bodies = off` skips validation, as it always
+  has, so dump/restore is unaffected.
+- **Repeated DDL no longer grows the backend without bound.** Creating or replacing a
+  pljs function reset the *entire* compiled-function cache, destroying every
+  per-user `JSContext`. QuickJS will not free a context that still has live
+  references into it, so the old contexts were not necessarily reclaimed: a loop of
+  `CREATE OR REPLACE FUNCTION` reached ~500 MB and then crashed the backend. Only
+  the affected function's entry is dropped now. Measured on the same loop: ~20 MB
+  peak, no crash.
 - **A failed `pljs.commit()`/`rollback()` is re-thrown** rather than converted to a
   catchable JavaScript exception, because there is no valid transaction state to
   resume into. Rejection *before* the commit starts — calling it in an atomic
