@@ -39,3 +39,39 @@ NOTICE:  now() read-back isDate=true
 RESET timezone;
 RESET datestyle;
 RESET extra_float_digits;
+-- A JavaScript *number* bound to a timestamp.
+--
+-- The non-Date branch now routes through the type's input function, which fixed
+-- date/timestamp *strings* (previously silently NULL) but also means a raw epoch
+-- number is rejected rather than quietly becoming NULL.  "Pass a millisecond
+-- epoch" is a common JavaScript habit, so this is a behaviour change worth having
+-- pinned and release-noted, per the PR 8 review.
+CREATE FUNCTION dt_num() RETURNS timestamptz LANGUAGE pljs AS $$
+  return 1577934245000;
+$$;
+SELECT dt_num();
+ERROR:  date/time field value out of range: "1577934245000"
+HINT:  Perhaps you need a different "datestyle" setting.
+-- The two forms that do work, for contrast: a Date, and a parseable string.
+CREATE FUNCTION dt_date() RETURNS timestamptz LANGUAGE pljs AS $$
+  return new Date(1577934245000);
+$$;
+CREATE FUNCTION dt_str() RETURNS timestamptz LANGUAGE pljs AS $$
+  return '2020-01-02 03:04:05+00';
+$$;
+SET TIME ZONE 'UTC';
+SELECT dt_date() AS from_date, dt_str() AS from_string;
+          from_date           |         from_string          
+------------------------------+------------------------------
+ Thu Jan 02 03:04:05 2020 UTC | Thu Jan 02 03:04:05 2020 UTC
+(1 row)
+
+RESET TIME ZONE;
+-- date behaves the same way.
+CREATE FUNCTION dt_date_num() RETURNS date LANGUAGE pljs AS $$ return 18263; $$;
+SELECT dt_date_num();
+ERROR:  invalid input syntax for type date: "18263"
+DROP FUNCTION dt_num();
+DROP FUNCTION dt_date();
+DROP FUNCTION dt_str();
+DROP FUNCTION dt_date_num();

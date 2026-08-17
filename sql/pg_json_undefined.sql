@@ -1,3 +1,6 @@
+-- NB: this file records CURRENT (incorrect) behaviour, not a contract: an
+-- undefined array element is dropped, shortening the array and shifting later
+-- indexes.  The expected output changes when that is fixed to emit JSON null.
 -- JSON/JSONB undefined-handling and in-place argument mutation (from plv8).
 --
 -- The mirror procedures build metadata objects with Object.assign and rely on

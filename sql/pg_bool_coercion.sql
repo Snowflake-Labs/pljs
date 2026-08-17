@@ -1,3 +1,8 @@
+-- NB: this file records CURRENT (incorrect) behaviour, not a contract.  A string
+-- bound to bool is coerced by truthiness here, so "false" reads as true; the fix
+-- routes it through bool's input function and this file's expected output changes
+-- when that lands.  Kept as a characterisation test on purpose, so the diff shows
+-- exactly what the fix changes.
 -- Stressor distilled from snowflake_cdc: boolean bind coercion.
 --
 -- A JS boolean bound to a bool column round-trips directly. Separately, the

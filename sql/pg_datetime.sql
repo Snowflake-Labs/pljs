@@ -33,3 +33,40 @@ $$ LANGUAGE pljs;
 RESET timezone;
 RESET datestyle;
 RESET extra_float_digits;
+
+-- A JavaScript *number* bound to a timestamp.
+--
+-- The non-Date branch now routes through the type's input function, which fixed
+-- date/timestamp *strings* (previously silently NULL) but also means a raw epoch
+-- number is rejected rather than quietly becoming NULL.  "Pass a millisecond
+-- epoch" is a common JavaScript habit, so this is a behaviour change worth having
+-- pinned and release-noted, per the PR 8 review.
+CREATE FUNCTION dt_num() RETURNS timestamptz LANGUAGE pljs AS $$
+  return 1577934245000;
+$$;
+
+SELECT dt_num();
+
+-- The two forms that do work, for contrast: a Date, and a parseable string.
+CREATE FUNCTION dt_date() RETURNS timestamptz LANGUAGE pljs AS $$
+  return new Date(1577934245000);
+$$;
+
+CREATE FUNCTION dt_str() RETURNS timestamptz LANGUAGE pljs AS $$
+  return '2020-01-02 03:04:05+00';
+$$;
+
+SET TIME ZONE 'UTC';
+SELECT dt_date() AS from_date, dt_str() AS from_string;
+RESET TIME ZONE;
+
+-- date behaves the same way.
+CREATE FUNCTION dt_date_num() RETURNS date LANGUAGE pljs AS $$ return 18263; $$;
+
+SELECT dt_date_num();
+
+DROP FUNCTION dt_num();
+DROP FUNCTION dt_date();
+DROP FUNCTION dt_str();
+DROP FUNCTION dt_date_num();
+

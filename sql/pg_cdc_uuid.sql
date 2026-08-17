@@ -1,3 +1,6 @@
+-- NB: this file records CURRENT (incorrect) behaviour, not a contract: a uuid is
+-- reinterpreted from its raw bytes rather than going through its output function.
+-- The expected output changes when the fallback conversion is fixed.
 -- snowflake_cdc type-boundary matrix: uuid-as-text.
 --
 -- The mirror procedures mint mirror ids with gen_random_uuid()::text

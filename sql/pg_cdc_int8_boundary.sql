@@ -1,3 +1,6 @@
+-- NB: parts of this file record CURRENT (incorrect) behaviour, not a contract:
+-- int8 values beyond 2^53 wrap or round here.  The expected output changes when
+-- the range and exactness checks land, and that diff is the point.
 -- snowflake_cdc type-boundary matrix: int8 / BigInt (extends pg_bigint_lsn).
 --
 -- int8 is the dominant control-plane type in the mirror procedures: WAL LSNs,
