@@ -67,8 +67,15 @@ run_tests() {  # $1 = space-separated test names -> 0 if all passed
 
 for commit in $(git rev-list --reverse "$BASE..HEAD"); do
   # Which tests does this commit define?
-  mapfile -t tests < <(git show --name-only --format= "$commit" -- sql/ \
-                       | sed -n 's|^sql/\(.*\)\.sql$|\1|p' | sort -u)
+  # No mapfile/readarray: macOS ships bash 3.2, where both are absent.  This used to
+  # use mapfile, which failed on every commit -- and the run still reported OK,
+  # because nothing checked that any commit had actually been evaluated.  See the
+  # zero-commit guard at the end.
+  tests=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && tests+=("$line")
+  done < <(git show --name-only --format= "$commit" -- sql/ \
+           | sed -n 's|^sql/\(.*\)\.sql$|\1|p' | sort -u)
   [ "${#tests[@]}" -eq 0 ] && continue
 
   # Does it change any source?  A test-only commit has nothing to revert.
@@ -147,12 +154,25 @@ for commit in $(git rev-list --reverse "$BASE..HEAD"); do
   git checkout -q "$ORIGINAL_HEAD" -- src/ sql/ expected/ Makefile
 done
 
+EVALUATED=$((PASS + COVERAGE + FAILED))
+
 echo
 echo "═══ summary ═══"
+echo "  commits evaluated:     $EVALUATED"
 echo "  discriminating:        $PASS"
 echo "  coverage-only (known): $COVERAGE"
 echo "  skipped:               $SKIPPED"
 echo "  problems:              $FAILED"
+
+# A sweep that evaluated nothing must not report success.  This is how the mapfile
+# bug above went unnoticed: every commit errored out of the loop, and the summary
+# printed four zeros and "OK".  Any gate that can pass by doing nothing is not a gate.
+if [ "$EVALUATED" -eq 0 ]; then
+  echo
+  echo "ctd: FAIL evaluated 0 commits -- the sweep did not run"
+  echo "     (check for shell errors above; this script needs git, make and a server)"
+  exit 1
+fi
 if [ "${#PROBLEMS[@]}" -gt 0 ]; then
   echo
   for p in "${PROBLEMS[@]}"; do echo "  - $p"; done
