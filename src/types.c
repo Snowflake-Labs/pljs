@@ -41,35 +41,12 @@ static JSClassID JS_CLASS_OBJECT = 1;
 static JSClassID JS_CLASS_STRING = 5;
 static JSClassID JS_CLASS_DATE = 10;
 static JSClassID JS_CLASS_ARRAY_BUFFER = 19;
-static JSClassID JS_CLASS_SHARED_ARRAY_BUFFER = 20;
-static JSClassID JS_CLASS_UINT8C_ARRAY = 21;
-static JSClassID JS_CLASS_INT8_ARRAY = 22;
-static JSClassID JS_CLASS_UINT8_ARRAY = 23;
-static JSClassID JS_CLASS_INT16_ARRAY = 24;
-static JSClassID JS_CLASS_UINT16_ARRAY = 25;
-static JSClassID JS_CLASS_INT32_ARRAY = 26;
-static JSClassID JS_CLASS_UINT32_ARRAY = 27;
 
 /**
  * Struct containing the type information for a catch-all*/
-// if given object is an array.
-inline static bool Is_ArrayType(JSValueConst obj, JSClassID class_id) {
-  return NULL != JS_GetOpaque(obj, class_id);
-}
-
 // if given object is array buffer.
 inline static bool Is_ArrayBuffer(JSValueConst obj) {
   return NULL != JS_GetOpaque(obj, JS_CLASS_ARRAY_BUFFER);
-}
-
-// if given object is shared array buffer.
-inline static bool Is_SharedArrayBuffer(JSValueConst obj) {
-  return NULL != JS_GetOpaque(obj, JS_CLASS_SHARED_ARRAY_BUFFER);
-}
-
-// if this is an actual object of any sort.
-inline static bool Is_Object(JSValueConst obj) {
-  return NULL != JS_GetOpaque(obj, JS_CLASS_OBJECT);
 }
 
 // if given object is a Date.
@@ -1715,83 +1692,55 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
 
   case BYTEAOID: {
     size_t psize;
-    size_t pbytes_per_element = 0;
-
     uint8_t *buffer;
 
-    uint32_t length = pljs_js_array_length(val, ctx);
+    /*
+     * Any typed array: take its backing store and copy the bytes in one shot.
+     *
+     * This replaces three near-identical per-width loops that between them
+     * covered only Int8/Uint8, Int16/Uint16 and Int32/Uint32.  The other five
+     * typed-array types -- Uint8ClampedArray, Float32Array, Float64Array,
+     * BigInt64Array and BigUint64Array -- matched no branch at all and fell
+     * through to the error below, so `return new Float64Array([1.5])` for a bytea
+     * column could not work.  (Before unhandled values started raising, they
+     * silently produced SQL NULL instead, which is why it went unnoticed.)
+     *
+     * JS_GetTypedArrayBuffer() reports the view's byteOffset and byteLength, so
+     * an offset view such as `new Uint8Array(buf, 4, 2)` copies those two bytes
+     * rather than the whole buffer, and it is a single memcpy instead of one
+     * JS_GetPropertyUint32() per element -- a 1MB bytea was a million property
+     * gets, which became the common case once bytea arguments started arriving
+     * as Uint8Array.
+     */
+    {
+      size_t ta_offset = 0, ta_length = 0, ta_elem = 0;
+      JSValue ta_buffer =
+          JS_GetTypedArrayBuffer(ctx, val, &ta_offset, &ta_length, &ta_elem);
 
-    if (Is_ArrayType(val, JS_CLASS_UINT8_ARRAY) ||
-        Is_ArrayType(val, JS_CLASS_INT8_ARRAY)) {
-      pbytes_per_element = 1;
-      psize = pbytes_per_element * length;
+      if (!JS_IsException(ta_buffer)) {
+        size_t abuf_size = 0;
+        uint8_t *abuf_data = JS_GetArrayBuffer(ctx, &abuf_size, ta_buffer);
 
-      uint8_t *array_copy = palloc(pbytes_per_element * length);
+        if (abuf_data == NULL || ta_offset + ta_length > abuf_size) {
+          JS_FreeValue(ctx, ta_buffer);
+          ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH),
+                          errmsg("could not read the typed array's buffer")));
+        }
 
-      for (size_t i = 0; i < length; i++) {
-        int32_t in;
+        buffer = palloc(VARHDRSZ + ta_length);
+        SET_VARSIZE(buffer, ta_length + VARHDRSZ);
+        memcpy(VARDATA(buffer), abuf_data + ta_offset, ta_length);
 
-        JSValue jsval = JS_GetPropertyUint32(ctx, val, i);
-        JS_ToInt32(ctx, &in, jsval);
-        array_copy[i] = (uint8_t)in;
+        JS_FreeValue(ctx, ta_buffer);
+
+        return PointerGetDatum(buffer);
       }
 
-      buffer = palloc(VARHDRSZ + psize);
+      /* Not a typed array; JS_GetTypedArrayBuffer left an exception pending. */
+      JS_FreeValue(ctx, JS_GetException(ctx));
+    }
 
-      SET_VARSIZE(buffer, psize + VARHDRSZ);
-      memcpy(VARDATA(buffer), array_copy, psize);
-
-      pfree(array_copy);
-
-      return PointerGetDatum(buffer);
-    } else if (Is_ArrayType(val, JS_CLASS_UINT16_ARRAY) ||
-               Is_ArrayType(val, JS_CLASS_INT16_ARRAY)) {
-      pbytes_per_element = 2;
-      psize = pbytes_per_element * length;
-
-      uint16_t *array_copy = palloc(pbytes_per_element * length);
-
-      for (size_t i = 0; i < length; i++) {
-        int32_t in;
-
-        JSValue jsval = JS_GetPropertyUint32(ctx, val, i);
-        JS_ToInt32(ctx, &in, jsval);
-        array_copy[i] = (uint16_t)in;
-      }
-
-      buffer = palloc(VARHDRSZ + psize);
-
-      SET_VARSIZE(buffer, psize + VARHDRSZ);
-      memcpy(VARDATA(buffer), array_copy, psize);
-
-      pfree(array_copy);
-
-      return PointerGetDatum(buffer);
-    } else if (Is_ArrayType(val, JS_CLASS_UINT32_ARRAY) ||
-               Is_ArrayType(val, JS_CLASS_INT32_ARRAY)) {
-      pbytes_per_element = 4;
-      psize = pbytes_per_element * length;
-
-      uint32_t *array_copy = palloc(pbytes_per_element * length);
-
-      for (size_t i = 0; i < length; i++) {
-        int32_t in;
-
-        JSValue jsval = JS_GetPropertyUint32(ctx, val, i);
-        JS_ToInt32(ctx, &in, jsval);
-        array_copy[i] = (uint32_t)in;
-      }
-
-      buffer = palloc(VARHDRSZ + psize);
-
-      SET_VARSIZE(buffer, psize + VARHDRSZ);
-      memcpy(VARDATA(buffer), array_copy, psize);
-
-      pfree(array_copy);
-
-      return PointerGetDatum(buffer);
-
-    } else if (Is_ArrayBuffer(val)) {
+    if (Is_ArrayBuffer(val)) {
       uint8_t *array_copy = JS_GetArrayBuffer(ctx, &psize, val);
 
       buffer = palloc(VARHDRSZ + psize);

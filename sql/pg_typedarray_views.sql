@@ -32,3 +32,63 @@ DROP FUNCTION ta_u16();
 DROP FUNCTION ta_u32();
 DROP FUNCTION ta_i32();
 DROP FUNCTION ta_off();
+
+-- Every typed-array type must convert, not just the widths that happened to have
+-- a branch.
+--
+-- The per-width loops covered only Int8/Uint8, Int16/Uint16 and Int32/Uint32.
+-- Uint8ClampedArray, Float32Array, Float64Array, BigInt64Array and
+-- BigUint64Array matched nothing and fell through to "cannot convert JavaScript
+-- value to bytea" -- and before unhandled values started raising, they silently
+-- produced SQL NULL, which is why it went unnoticed.  The conversion now takes
+-- the view's backing store, so every type works by construction.
+CREATE FUNCTION tav_all(kind text) RETURNS bytea LANGUAGE pljs AS $$
+  switch (kind) {
+    case 'Int8':        return new Int8Array([1, 2]);
+    case 'Uint8':       return new Uint8Array([1, 2]);
+    case 'Uint8Clamped':return new Uint8ClampedArray([1, 2]);
+    case 'Int16':       return new Int16Array([1, 2]);
+    case 'Uint16':      return new Uint16Array([1, 2]);
+    case 'Int32':       return new Int32Array([1, 2]);
+    case 'Uint32':      return new Uint32Array([1, 2]);
+    case 'Float32':     return new Float32Array([1, 2]);
+    case 'Float64':     return new Float64Array([1, 2]);
+    case 'BigInt64':    return new BigInt64Array([1n, 2n]);
+    case 'BigUint64':   return new BigUint64Array([1n, 2n]);
+  }
+  throw new Error('unknown kind ' + kind);
+$$;
+
+SELECT kind, encode(tav_all(kind), 'hex') AS bytes
+  FROM unnest(ARRAY['Int8','Uint8','Uint8Clamped','Int16','Uint16','Int32',
+                    'Uint32','Float32','Float64','BigInt64','BigUint64']) AS kind;
+
+-- Offset views of each width copy the view's own bytes, not the whole buffer:
+-- byteOffset and byteLength come from the view, so this cannot regress into
+-- reading from the start of the buffer.
+CREATE FUNCTION tav_offset(kind text) RETURNS bytea LANGUAGE pljs AS $$
+  const b = new Uint8Array([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]).buffer;
+  switch (kind) {
+    case 'Uint8':   return new Uint8Array(b, 4, 2);
+    case 'Uint16':  return new Uint16Array(b, 4, 2);
+    case 'Uint32':  return new Uint32Array(b, 4, 2);
+    case 'Float64': return new Float64Array(b, 8, 1);
+  }
+  throw new Error('unknown kind ' + kind);
+$$;
+
+SELECT kind, encode(tav_offset(kind), 'hex') AS bytes
+  FROM unnest(ARRAY['Uint8','Uint16','Uint32','Float64']) AS kind;
+
+-- A zero-length view is an empty bytea, not a NULL and not the whole buffer.
+CREATE FUNCTION tav_empty() RETURNS bytea LANGUAGE pljs AS $$
+  const b = new Uint8Array([1,2,3,4]).buffer;
+  return new Uint8Array(b, 2, 0);
+$$;
+
+SELECT length(tav_empty()) AS empty_view_length, tav_empty() IS NULL AS is_null;
+
+DROP FUNCTION tav_all(text);
+DROP FUNCTION tav_offset(text);
+DROP FUNCTION tav_empty();
+

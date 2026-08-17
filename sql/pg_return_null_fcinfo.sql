@@ -17,8 +17,14 @@ DO $$
     try { pljs.execute('SELECT $1::bytea AS b', [ v ]); return 'no error'; }
     catch (e) { return 'err'; }
   }
+  // A Float64Array is a perfectly good byte source and now converts; it used to
+  // be listed here as unconvertible, which encoded a gap rather than a contract.
+  // What must still be rejected is a value with no byte representation at all.
   pljs.elog(NOTICE, 'bytea reject: ' + bind_bytea({}) + ' ' +
-                    bind_bytea(new Float64Array([1, 2])));
+                    bind_bytea(42) + ' ' + bind_bytea(true));
+  pljs.elog(NOTICE, 'typed arrays accepted: ' +
+                    bind_bytea(new Float64Array([1, 2])) + ' ' +
+                    bind_bytea(new BigInt64Array([1n])));
 $$ LANGUAGE pljs;
 
 -- site 2: non-Date JS value bound to date / timestamp -> clean error, no crash.
