@@ -60,6 +60,21 @@ trap restore EXIT
 PASS=0; FAILED=0; COVERAGE=0; SKIPPED=0
 declare -a PROBLEMS=()
 
+# Roles are cluster-level, so pg_regress dropping contrib_regression does not remove
+# them.  That matters here because the without-fix pass often crashes the backend --
+# that is the bug being tested -- so the test's own DROP ROLE never runs, and the
+# with-fix pass then fails with "role already exists" and looks like a commit that is
+# not green on its own source.  pg_find_function_no_perm hit exactly this.
+drop_leftover_roles() {  # $1 = commit, $2 = space-separated test names
+  local commit="$1" tests="$2" t role
+  for t in $tests; do
+    for role in $(git show "$commit:sql/$t.sql" 2>/dev/null \
+                  | sed -nE 's/^[[:space:]]*CREATE (ROLE|USER)[[:space:]]+([A-Za-z0-9_]+).*/\2/p'); do
+      psql -X -q -d postgres -c "DROP ROLE IF EXISTS $role" >/dev/null 2>&1
+    done
+  done
+}
+
 run_tests() {  # $1 = space-separated test names -> 0 if all passed
   local tests="$1"
   make -s -C "$ROOT" installcheck REGRESS="init-extension $tests" >/tmp/ctd_check.log 2>&1
@@ -110,6 +125,7 @@ for commit in $(git rev-list --reverse "$BASE..HEAD"); do
   fi
   make -s -C "$ROOT" install >/dev/null 2>&1
 
+  drop_leftover_roles "$commit" "$testlist"
   if run_tests "$testlist"; then
     without="passed"
   else
@@ -120,6 +136,7 @@ for commit in $(git rev-list --reverse "$BASE..HEAD"); do
   git checkout -q "$commit" -- src/ 2>/dev/null
   make -s -C "$ROOT" >/dev/null 2>&1
   make -s -C "$ROOT" install >/dev/null 2>&1
+  drop_leftover_roles "$commit" "$testlist"
   if run_tests "$testlist"; then
     with="passed"
   else
@@ -129,7 +146,10 @@ for commit in $(git rev-list --reverse "$BASE..HEAD"); do
   # Is any of these tests self-declared coverage-only?
   is_coverage=0
   for t in "${tests[@]}"; do
-    if git show "$commit:sql/$t.sql" 2>/dev/null \
+    # Read the marker from HEAD, not from this commit: a test may be labelled
+    # coverage-only later than the commit that introduced it, which is what happened
+    # to pg_spi_freetuptable.
+    if git show "$ORIGINAL_HEAD:sql/$t.sql" 2>/dev/null \
          | grep -qi 'not a discriminating regression test'; then
       is_coverage=1
     fi
@@ -146,8 +166,14 @@ for commit in $(git rev-list --reverse "$BASE..HEAD"); do
     echo "    EXPECTED-COVERAGE  passes without the fix, and says so in its header"
     COVERAGE=$((COVERAGE + 1))
   else
-    echo "    PROBLEM: passes without the fix -- not a regression test"
-    PROBLEMS+=("${commit:0:9} passes without the fix -- $subject ($testlist)")
+    changed_since=""
+    for t in "${tests[@]}"; do
+      if ! git diff --quiet "$commit" "$ORIGINAL_HEAD" -- "sql/$t.sql" 2>/dev/null; then
+        changed_since=" [test has been changed since this commit -- check HEAD's version]"
+      fi
+    done
+    echo "    PROBLEM: passes without the fix -- not a regression test$changed_since"
+    PROBLEMS+=("${commit:0:9} passes without the fix -- $subject ($testlist)$changed_since")
     FAILED=$((FAILED + 1))
   fi
 
