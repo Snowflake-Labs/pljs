@@ -75,8 +75,24 @@ drop_leftover_roles() {  # $1 = commit, $2 = space-separated test names
   done
 }
 
+# Several of these tests crash the backend on purpose when run without their fix.
+# The server then restarts and spends a moment in crash recovery, and pg_regress's
+# first act is DROP DATABASE -- which fails with "the database system is in recovery
+# mode", so the *next* pass looks like a failure that has nothing to do with the code
+# under test.  Wait for the server to come back before each pass.
+wait_for_server() {
+  local i
+  for i in $(seq 1 60); do
+    psql -X -qAt -d postgres -c 'SELECT 1' >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  echo "    WARNING: server did not come back within 60s" >&2
+  return 1
+}
+
 run_tests() {  # $1 = space-separated test names -> 0 if all passed
   local tests="$1"
+  wait_for_server
   make -s -C "$ROOT" installcheck REGRESS="init-extension $tests" >/tmp/ctd_check.log 2>&1
 }
 
