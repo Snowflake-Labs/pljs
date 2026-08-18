@@ -1,0 +1,101 @@
+sha	target	subject
+40a8820	DROP-fork-ci	ci: add Snowflake-Labs CI for the pljs hardening branches
+35c657b	HELD-data-format	fix: correctly encode NAMEOID bind parameters in pljs_jsvalue_to_datum
+06f6d90	PR2-error-reporting	fix: call FlushErrorState() after CopyErrorData() in pljs_execute PG_CATCH
+6948feb	PR3-crashes	fix: call SPI_freetuptable() after result conversion in pljs_execute
+01b942f	HELD-data-format	fix: make NULL bind parameters work in pljs.execute
+6ecd384	PR8-null-record	fix: avoid PG_RETURN_NULL() with NULL fcinfo in remaining edge cases
+aee8377	PR4-lifetimes	fix: allocate prepared plan data in CacheMemoryContext
+2b10d94	PR2-error-reporting	fix: preserve JS error message and Postgres detail across SPI boundary
+55c1199	FOLD-tests	test: lock down int64/BigInt losslessness through pljs.execute
+b3b8e5c	FOLD-tests	test: lock down boolean bind coercion used by snowflake_cdc
+4d10c08	FOLD-tests	test: lock down rich/nested type marshalling through pljs.execute
+7611ac6	FOLD-tests	test: lock down nested-error envelope (message/SQLSTATE/detail/hint)
+171ec0f	FOLD-tests	test: differential port of plv8 scalar_args/varparam/bytea scenarios
+334ea1b	FOLD-tests	test: SPI subtransaction isolation on a caught pljs.execute error
+012a361	FOLD-tests	test: lock down the snowflake_cdc type-boundary matrix
+872bee5	FOLD-tests	test: wire orphaned currentresource.sql into REGRESS
+f399243	FOLD-tests	test: port plv8 coverage gaps into owned pljs regression tests
+67c4bdb	PR1-corruption	fix: bound Uint32/Int32Array->bytea copy loop by length, not 4*length
+b744011	PR1-corruption	fix: don't return from inside PG_TRY in pljs_find_function
+ba7a32d	PR4-lifetimes	fix: free parstate on pljs_prepare error path
+9bcfda5	PR3-crashes	fix: guard cursor fetch/move/close with an internal subtransaction
+7ee6607	PR4-lifetimes	fix: reclaim prepared-statement plans via a GC finalizer
+23ef8af	PR3-crashes	fix: release proctuple syscache pin per-branch before entering JS
+ddea75b	PR5-leaks	fix: drop leaked JS references in pljs storage helpers
+cd99c59	PR1-corruption	fix: copy prosrc with pstrdup instead of fixed-length memcpy
+8be1343	PR6-operability	fix: honor query cancellation instead of hijacking backend signals
+9edaac5	PR6-operability	fix: bound JS stack size explicitly instead of trusting the vendored default
+164515a	PR6-operability	fix: re-apply pljs.memory_limit to the live runtime on SET
+20af343	HELD-data-format	fix: reject unconvertible JS values instead of silently corrupting/dropping them
+4ee9521	HELD-data-format	fix: stop corrupting invalid Dates and multidimensional arrays; add type matrix
+a8ebc82	PR8-null-record	fix: treat undefined array elements as NULL without nulling the whole array
+46539fb	FOLD-tests	test: add memory-growth and low-memory determinism regression tests
+9c8fa85	FOLD-tests	test: add cache-invalidation regression test
+da2148a	PR5-leaks	fix: free per-iteration SPI plan and paramlist in pljs.execute/plan.execute
+2de3e39	PR5-leaks	fix: free the property-name table from JS_GetOwnPropertyNames on object key enumeration
+7f21ceb	PR3-crashes	fix: flush the error state in every PG_CATCH that reports to JavaScript
+7b31b49	HELD-data-format	fix: make the JavaScript to json/jsonb conversion memory-safe and lossless
+c97d786	HELD-data-format	fix: resolve a window function's polymorphic argument types
+fbb43b9	HELD-data-format	fix: convert unhandled types through their I/O functions, not their bytes
+86c56b8	PR8-null-record	fix: report SQL NULL through fcinfo on the composite, record and fallback paths
+9bd0c78	PR8-null-record	fix: let a null/undefined value be SQL NULL for an array type
+2b78a71	PR8-null-record	fix: read the column value from a row object for a single-column set
+b7112ae	HELD-data-format	fix: parse a JavaScript string into int2/int4/int8/numeric exactly
+0d973d0	HELD-data-format	fix: reject out-of-range integers instead of wrapping them silently
+7feedf5	PR8-null-record	fix: emit a NULL row for return_next(null) on a composite set
+4d7b1c9	HELD-data-format	fix: parse a JavaScript string bound to bool instead of coercing truthiness
+5a970de	PR8-null-record	fix: convert an undefined jsonb array element to null instead of dropping it
+4f87f04	HELD-data-format	fix: surface bytea as a Uint8Array so its bytes survive JavaScript
+0dc1d21	PR2-error-reporting	fix: say which column and which properties mismatched in return_next
+b9efd25	HELD-data-format	fix: dispatch array conversion on the SQL type, fixing RETURNS jsonb[]
+416610e	PR3-crashes	fix: free the compiled function and context in pljs_call_validator
+0233838	PR3-crashes	fix: free QuickJS state in pljs_cache_reset before dropping its memory
+dcb4fdd	FORK-ONLY-tooling	test: add a mixed success/failure memory harness driven by pgbench
+29ae38a	PR5-leaks	fix: release the per-column JSValue in the composite conversion loops
+a33c84f	PR4-lifetimes	fix: free the cursor open's parameter arrays and mark the portal volatile
+1207177	PR5-leaks	fix: free the SPI plan and parameters when a parameterised execute raises
+1c6c2fd	PR4-lifetimes	fix: keep the prepared plan alive for the lifetime of its cursor
+7bd30b6	PR3-crashes	fix: bound jsonb nesting with check_stack_depth and free the frame on a raise
+fb7eaaa	PR3-crashes	fix: read pg_language through its own struct and release the pg_proc pin
+b3a9ac0	PR2-error-reporting	fix: say a record-returning function needs a column definition list
+b46a78c	PR6-operability	fix: re-throw a real commit/rollback failure instead of resuming JavaScript
+a84717c	PR3-crashes	fix: do not let a PostgreSQL error longjmp out of pljs.return_next
+b3e89c2	PR3-crashes	fix: guard the two remaining JS-callable entry points against escaping errors
+a7cebd8	HELD-data-format	fix: build the bytea view without going through the global Uint8Array
+1126507	HELD-data-format	fix: reject inexact bigints and out-of-range float4 instead of altering them
+85e79b7	FOLD-docs	docs: record why single-column return_next resolves by arity, not by name
+85b3a14	PR2-error-reporting	fix: expose the SQLSTATE as e.sqlstate as well as e.sqlerrcode
+9551ff9	PR2-error-reporting	fix: give user data-type errors a real SQLSTATE instead of XX000
+6eca872	PR2-error-reporting	fix: cap the property list in the return_next mismatch message
+ed656db	HELD-data-format	fix: route a String object through bool's input function too
+5930c02	PR2-error-reporting	refactor: one helper for reporting a JavaScript exception, and test the envelope
+f4dbf54	HELD-data-format	refactor: unify the argument-type policy and clear four review nits
+f8ad641	FOLD-docs	docs: record that pg_object_keys_leak discriminates, and why memory_limit
+8583507	FOLD-tests	test: pin undefined and the single-column null-row interactions
+6b2261c	FOLD-tests	test: prove the cancellation is uncatchable, and the memory limit is restored
+2b83a11	HELD-data-format	fix: convert any typed array to bytea via its backing store
+09b8f75	HELD-data-format	fix: convert JavaScript strings to the server encoding, not raw UTF-8
+28c6706	HELD-data-format	fix: reject a JavaScript array aimed at a non-array type
+b7ab1a3	HELD-data-format	docs: one consolidated release note, and mark the characterisation tests
+122d72a	PR5-leaks	fix: widen the interrupt check, and stop leaking the exception value
+7f59030	FOLD-tests	test: clear the remaining review notes on test naming, wording and coverage
+8d61cfe	PR7-validator-cache	Make the validator actually validate the function being created
+18a87b2	PR7-validator-cache	Invalidate only the replaced function, not the whole context cache
+6ce958e	FOLD-format	Run make format
+9d9342a	PR7-validator-cache	Detect a stale cached function instead of running the old body forever
+8940a32	PR3-crashes	Fix a backend crash in pljs.find_function()
+c7b05f5	PR3-crashes	Connect to SPI in call_trigger(), so a trigger can query at all
+b00c0c8	FORK-ONLY-tooling	Make the memory harness gate on pljs, not on PostgreSQL's DDL cost
+adcc49d	PR6-operability	Re-anchor the JS stack budget at each entry into JS
+f295dd0	PR6-operability	Make the JS stack budget observable, instead of claiming it cannot be
+be6cf0b	FORK-ONLY-tooling	Add an ASan runner, and a multi-version runner
+26cbba0	FORK-ONLY-selfinflicted	Build and pass on PostgreSQL 18
+77d486b	FORK-ONLY-tooling	Add a test-discrimination sweep, and make it fail when it checks nothing
+ce26576	FORK-ONLY-tooling	ctd: clean up cluster-level roles between passes
+aaab721	FORK-ONLY-tooling	ctd: wait for the server between passes
+1414967	FORK-ONLY-tooling	ctd: wait for the server before dropping leftover roles, not after
+0ecba55	FORK-ONLY-tooling	ctd: drop the regression database before its roles
+fb6bd7f	FORK-ONLY-tooling	Classify the five tests the discrimination sweep flags, precisely
+c4ecc4c	FORK-ONLY-tooling	ctd: match the coverage markers as written, not as imagined
+5be14c9	FORK-ONLY-tooling	Add a per-commit full-suite check
