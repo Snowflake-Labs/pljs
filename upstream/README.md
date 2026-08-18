@@ -97,6 +97,47 @@ reasoning, drop coordinates; no "as asked", "previously", "in this series", or
 keep the explanation — an upstream reader needs it — and state it without referring to
 a sweep that will not exist there.
 
+## Two rules that make the reorder safe
+
+Found by hitting them, not by planning. Both are load-bearing.
+
+### 1. An error-text or SQLSTATE change belongs to the commit that owns the error site
+
+A commit whose only job is to retroactively change messages or SQLSTATEs across many
+sites cannot be placed in any order: it edits the expected output of tests that, in a
+reordered series, do not exist yet. `fix: give user data-type errors a real SQLSTATE`
+was exactly this — 8 hunks across 2 files, each at a different error site, plus 5
+`expected/` edits.
+
+It is therefore not a commit. Its hunks travel with whichever commit introduces each
+site, which is computable:
+
+| error site | owner | travels with |
+|---|---|---|
+| `plan expected %d arguments…` | pre-existing upstream | ships now, as its own small commit |
+| `value is not an Array` | `86c56b8` | PR 8 |
+| `ArrayBuffer, or typed array` | `20af343` | held |
+| `could not convert…to a string` | `20af343` | held |
+
+You cannot give a real SQLSTATE to an error that does not exist yet, so this is the
+only coherent split. Apply the same test to any other commit that edits messages
+broadly.
+
+### 2. `expected/` output is derived, so regenerate it — never inherit it
+
+32 of the 75 added `expected/` files are edited after being added, because they track
+behaviour as it changes. Inheriting an old version into a reordered series produces a
+red commit whose diff looks like a regression but is only staleness.
+
+So: whenever a commit adds or modifies a test, generate its `expected/` from the tree
+at that commit rather than taking the version recorded in the original history. The
+`sql/` file is authored content; the `.out` file is output. Generating it is correct by
+construction, and the per-commit suite run is what proves it.
+
+The one discipline this needs: read every generated diff. A regenerated file that
+silently absorbs a real regression is the failure mode, which is why the per-commit run
+is a gate and not a formality.
+
 ## Per-commit verification
 
 The bar is every commit green, not every PR green. Use `tools/check-every-commit.sh`,
