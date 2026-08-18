@@ -1,6 +1,6 @@
 # Make a runaway pljs function killable, and bound its stack
 
-Four operability fixes. The first is the most severe thing in this stack for anyone
+Three operability fixes. The first is the most severe thing in this stack for anyone
 running pljs in production.
 
 ## Query cancellation was broken process-wide
@@ -45,22 +45,34 @@ The budget is derived from `max_stack_depth`, and the test proves that: the achi
 recursion depth tracks it linearly (512kB → 268, 1024kB → 537, 2048kB → 1074,
 4096kB → 2148), and the assertion fails if the explicit limit is not set.
 
-## Also
+## Not included: re-throwing a failed commit
 
-`pljs.memory_limit` is applied to the live runtime on `SET`, rather than changing the
-GUC without reaching the interpreter. And a failed `pljs.commit()`/`rollback()` is
-re-thrown rather than converted to a catchable JavaScript exception, because there is no
-valid transaction state to resume into — rejection *before* the commit starts stays
-catchable, since nothing has changed at that point.
+A `pljs.commit()` that genuinely fails is still converted into a catchable JavaScript
+exception, so a function can carry on running with no valid transaction state under it.
+That is a real problem, and the obvious fix — `PG_RE_THROW()` from the `PG_CATCH` —
+does not work: `pljs_commit()` is a C function that QuickJS called, so re-throwing
+`siglongjmp`s past the interpreter's own frame list and the next JavaScript call in the
+session faults. Reproduced with a deferred unique constraint, which fails at `COMMIT`:
+
+    CALL p();                    -- p() swallows the failed commit
+    SELECT f();                  -- f() calls pljs.commit(): backend dies
+
+Fixing it properly means letting QuickJS unwind first and re-raising the saved error
+once control is back in C — the shape the interrupt handler already uses — which is a
+larger change than belongs in this series. Left for a follow-up rather than shipped
+half-done.
+
+`pljs.memory_limit` being applied to the live runtime on `SET` moved to the leaks PR,
+where the heap-leak tests depend on it.
 
 ## Commits
 
 - `Honor query cancellation instead of hijacking backend signals`
-- `Widen the interrupt check, and stop leaking the exception value`
 - `Bound the JavaScript stack size explicitly`
 - `Re-anchor the JavaScript stack budget at each entry into JavaScript`
-- `Make the derived stack budget observable in the regression suite`
-- `Re-apply pljs.memory_limit to the live runtime on SET`
-- `Re-throw a real commit or rollback failure`
+- `Widen the interrupt check, and stop leaking the exception value`
 
-Every commit builds and passes the full suite on its own, on PostgreSQL 16, 17 and 18.
+Every commit in this series builds from clean and passes the full ordered suite on its
+own, verified per commit on PostgreSQL 17. The tip is additionally green on PostgreSQL
+16, 17, 18 and 19beta3 — the versions this repository's CI matrix builds — with
+`pljs.memory_limit=64`, and under AddressSanitizer with no reports.

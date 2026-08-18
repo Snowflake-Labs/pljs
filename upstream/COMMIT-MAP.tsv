@@ -59,7 +59,7 @@ a33c84f	PR4-lifetimes	fix: free the cursor open's parameter arrays and mark the 
 7bd30b6	HELD-data-format	fix: bound jsonb nesting with check_stack_depth and free the frame on a raise
 fb7eaaa	PR3-crashes	fix: read pg_language through its own struct and release the pg_proc pin
 b3a9ac0	PR2-error-reporting	fix: say a record-returning function needs a column definition list
-b46a78c	PR6-operability	fix: re-throw a real commit/rollback failure instead of resuming JavaScript
+b46a78c	HELD-needs-quickjs-unwind-before-rethrow	fix: re-throw a real commit/rollback failure instead of resuming JavaScript
 a84717c	PR3-crashes	fix: do not let a PostgreSQL error longjmp out of pljs.return_next
 b3e89c2	PR3-crashes	fix: guard the two remaining JS-callable entry points against escaping errors
 a7cebd8	HELD-data-format	fix: build the bytea view without going through the global Uint8Array
@@ -88,7 +88,7 @@ b7ab1a3	HELD-data-format	docs: one consolidated release note, and mark the chara
 c7b05f5	PR3-crashes	Connect to SPI in call_trigger(), so a trigger can query at all
 b00c0c8	FORK-ONLY-tooling	Make the memory harness gate on pljs, not on PostgreSQL's DDL cost
 adcc49d	PR6-operability	Re-anchor the JS stack budget at each entry into JS
-f295dd0	PR6-operability	Make the JS stack budget observable, instead of claiming it cannot be
+f295dd0	FOLDED-into-bound-the-js-stack-size	Make the JS stack budget observable, instead of claiming it cannot be
 be6cf0b	FORK-ONLY-tooling	Add an ASan runner, and a multi-version runner
 26cbba0	FORK-ONLY-selfinflicted	Build and pass on PostgreSQL 18
 77d486b	FORK-ONLY-tooling	Add a test-discrimination sweep, and make it fail when it checks nothing
@@ -99,3 +99,4 @@ aaab721	FORK-ONLY-tooling	ctd: wait for the server between passes
 fb6bd7f	FORK-ONLY-tooling	Classify the five tests the discrimination sweep flags, precisely
 c4ecc4c	FORK-ONLY-tooling	ctd: match the coverage markers as written, not as imagined
 5be14c9	FORK-ONLY-tooling	Add a per-commit full-suite check
+(new)	PR3-crashes	fix: do not write through a null fcinfo when a composite column is NULL

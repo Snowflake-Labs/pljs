@@ -27,19 +27,33 @@ flood the server log; and a `RETURNS record` function called without a column
 definition list says so, instead of reporting `record type has not been registered`.
 
 The six copies of the message-fallback expression are replaced by one helper, which
-also stops the next such site from forgetting the empty-string guard.
+also stops the next such site from forgetting the empty-string guard. That commit
+changes no behaviour by design, and `sql/pg_error_envelope_fields.sql` says so at the
+top: it is coverage that pins the envelope a caller programs against, not a regression
+test, and it passes with and without the change.
+
+One note on how the argument-count SQLSTATE is asserted. It cannot be read from
+JavaScript: that error is raised by a C function QuickJS called, and it unwinds past any
+`try`/`catch` rather than arriving as an exception — unlike an error from
+`pljs.execute()`. The test uses `\set VERBOSITY sqlstate` instead. Making
+`plan.execute()` errors catchable the way `pljs.execute()`'s are is a separate change,
+not attempted here.
 
 ## Commits
 
-- `Preserve the JavaScript error message and PostgreSQL detail across SPI`
 - `Flush the error state after copying it in pljs_execute`
+- `Preserve the JavaScript error message and PostgreSQL detail across SPI`
 - `Expose the SQLSTATE as e.sqlstate`
-- `Give user data-type errors a real SQLSTATE`
-- `Report one helper for a JavaScript exception, and test the envelope`
+- `Report a JavaScript exception through one helper, and test the envelope`
+- `Give the argument-count mismatch a real SQLSTATE`
 - `Say which column and which properties mismatched in return_next`
 - `Cap the property list in the return_next mismatch message`
 - `Say that a record-returning function needs a column definition list`
 
 Later fixes in this stack depend on this one: the structured error object is what they
-report through. Every commit builds and passes the full suite on its own, on
-PostgreSQL 16, 17 and 18.
+report through.
+
+Every commit in this series builds from clean and passes the full ordered suite on its
+own, verified per commit on PostgreSQL 17. The tip is additionally green on PostgreSQL
+16, 17, 18 and 19beta3 — the versions this repository's CI matrix builds — with
+`pljs.memory_limit=64`, and under AddressSanitizer with no reports.

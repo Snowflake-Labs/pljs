@@ -83,7 +83,7 @@ run() {                                  # $1 = tests; 0 = all passed
 
 crashed() { grep -qaE 'server closed the connection|connection to server|terminated by signal' /tmp/csd_check.log; }
 
-DISCRIM=0; WEAK=0; NOTEST=0; EXPECTED=0; BROKEN=0
+DISCRIM=0; WEAK=0; NOTEST=0; EXPECTED=0; BROKEN=0; DECLARED=0
 declare -a PROBLEMS=()
 
 for commit in $(git rev-list --reverse "$BASE..$ORIGINAL_HEAD"); do
@@ -109,9 +109,20 @@ for commit in $(git rev-list --reverse "$BASE..$ORIGINAL_HEAD"); do
     continue
   fi
   if [ -z "$tests" ]; then
-    printf "  %s  %-52s  NO TEST\n" "$short" "$subject"
-    NOTEST=$((NOTEST + 1))
-    PROBLEMS+=("$short no test -- $subject")
+    # A commit with no test may say so in its message, and why.  Some fixes cannot
+    # be observed through query output at all -- a heap over-read that changes
+    # nothing, a leak of a few hundred bytes in a context the transaction frees, an
+    # interrupt a SQL script cannot raise on demand.  Requiring a test there would
+    # only produce tests that assert nothing, which is worse than an honest note.
+    # An undeclared missing test is still reported.
+    if git log -1 --format=%B "$commit" | grep -q 'No regression test accompanies this'; then
+      printf "  %s  %-52s  no test, and says why\n" "$short" "$subject"
+      DECLARED=$((DECLARED + 1))
+    else
+      printf "  %s  %-52s  NO TEST\n" "$short" "$subject"
+      NOTEST=$((NOTEST + 1))
+      PROBLEMS+=("$short no test -- $subject")
+    fi
     continue
   fi
 
@@ -174,13 +185,14 @@ for commit in $(git rev-list --reverse "$BASE..$ORIGINAL_HEAD"); do
   git checkout -q "$ORIGINAL_HEAD" -- src/ sql/ expected/ Makefile
 done
 
-TOTAL=$((DISCRIM + WEAK + NOTEST + EXPECTED + BROKEN))
+TOTAL=$((DISCRIM + WEAK + NOTEST + EXPECTED + BROKEN + DECLARED))
 echo
 echo "═══ summary ═══"
 echo "  commits examined:            $TOTAL"
 echo "  discriminating:              $DISCRIM"
 echo "  cannot discriminate (stated): $EXPECTED"
-echo "  no test:                     $NOTEST"
+echo "  no test, declared:           $DECLARED"
+echo "  no test, undeclared:         $NOTEST"
 echo "  passes without the fix:      $WEAK"
 echo "  not green / build broken:    $BROKEN"
 

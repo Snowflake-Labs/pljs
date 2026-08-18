@@ -28,4 +28,6 @@ are the same piece of code.
 They are held back deliberately rather than split badly, and will follow with that
 rework.
 
-The commit builds and passes the full regression suite on its own.
+The commit builds from clean and passes the full ordered suite on its own, on PostgreSQL
+17, and is green on 16, 17, 18 and 19beta3 with `pljs.memory_limit=64` and under
+AddressSanitizer.

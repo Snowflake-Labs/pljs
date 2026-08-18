@@ -40,4 +40,7 @@ leave the handle pointing at a plan the finalizer would try again.
 - `Keep the prepared plan alive for the lifetime of its cursor`
 - `Guard the plan-release path against an error escaping into QuickJS`
 
-Every commit builds and passes the full suite on its own, on PostgreSQL 16, 17 and 18.
+Every commit in this series builds from clean and passes the full ordered suite on its
+own, verified per commit on PostgreSQL 17. The tip is additionally green on PostgreSQL
+16, 17, 18 and 19beta3 — the versions this repository's CI matrix builds — with
+`pljs.memory_limit=64`, and under AddressSanitizer with no reports.

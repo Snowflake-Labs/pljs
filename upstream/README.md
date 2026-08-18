@@ -23,14 +23,17 @@ in advance so the long run is mechanical.
 
 | PR | branch | commits |
 |---|---|---|
-| 1 | `up/01-memory-corruption` | 3 |
+| 1 | `up/01-memory-corruption` | 4 |
 | 2 | `up/02-error-reporting` | 8 |
-| 3 | `up/03-crashes` | 12 |
-| 4 | `up/04-lifetimes` | 5 |
+| 3 | `up/03-crashes` | 11 |
+| 4 | `up/04-lifetimes` | 6 |
 | 5 | `up/05-leaks` | 6 |
-| 6 | `up/06-operability` | 6 |
+| 6 | `up/06-operability` | 4 |
 | 7 | `up/07-validator-and-cache` | 3 |
-| 8 | `up/08-null-and-record` | 7 |
+| 8 | `up/08-null-rows` | 1 |
+
+Counts are generated from the branch, not maintained by hand — `pr-NN` commit lists are
+rewritten from `git log` so they cannot drift from what is actually being sent.
 
 PR 3 depends on PR 2 — four of its commits report through the structured error object
 that PR 2 introduces. Everything else is independent, so 4–8 can go in parallel once 3
@@ -145,10 +148,53 @@ which does a clean build plus the full ordered suite at each commit. It is the g
 that caught two red commits in the current stack, and reordering is exactly the
 operation that produces them. Also required before sending each PR:
 
-- `tools/check-versions.sh` — PostgreSQL 16, 17, 18 and a low `pljs.memory_limit`
+- `tools/check-versions.sh` — PostgreSQL 16, 17, 18, 19beta3 and a low
+  `pljs.memory_limit`. 19 matters: it is in upstream's CI matrix, and the tree did not
+  compile against it — `strftime`/`gmtime` reached through an include PostgreSQL 19
+  dropped, and a `Datum` passed where a pointer is wanted. Both are upstream's own code
+  and `origin/main` fails the same way; their CI stays green only because gcc warns
+  where clang errors. Fixed as the first commit of the series.
 - `tools/installcheck-asan.sh` — zero sanitizer reports
 - `tools/pljs-memory-matrix.sh` — green
 - final tree equals the current tree, minus held/fork-only commits
+
+## What the src-discrimination gate found
+
+`tools/check-src-discrimination.sh` undoes each commit's `src/` change, keeps its tests,
+and requires the tests to fail. A commit whose own test still passes without its code has
+shipped no protection. Running it changed the series materially:
+
+| | before | after |
+|---|---|---|
+| discriminating | 22 | **30** |
+| passes without its fix | 5 | **0** |
+| no test, with a stated reason | 1 | **12** |
+| no test, undeclared | 14 | **0** |
+
+Four things it caught that per-commit greenness did not:
+
+1. **A crash this series introduced.** `Re-throw a real commit or rollback failure`
+   calls `PG_RE_THROW()` from a C function QuickJS called, which unwinds past the
+   interpreter's frame list; the next JavaScript call in the session faults. Upstream
+   does not have this bug — we would have added it. Commit dropped; see the PR 6
+   description for the reproduction.
+2. **A pre-existing upstream crash**, found while trying to make an inert test
+   discriminate: a composite column converting to NULL writes through a null `fcinfo`.
+   Reproduces on `origin/main`. Now fixed with a test, in PR 3.
+3. **A test that asserted its own sanity check.** `pg_return_next_error_frames` used a
+   value that only raises once the held integer range check exists, so the conversion
+   never failed — and the recorded output was
+   `srf failed as expected: expected the conversion to fail`, the message its own guard
+   emits. It had been passing by asserting that its assertion misfired.
+4. **Two tests measuring nothing.** The `SET pljs.memory_limit` fix landed *after* the
+   heap-leak tests that depend on it, so they ran under the 512MB default instead of the
+   64MB they set; and the stack-budget fix computes `max_stack_depth / 2`, which at the
+   2048kB default equals `JS_DEFAULT_STACK_SIZE` exactly, so the suite passed whether or
+   not the limit was applied.
+
+The two remaining categories are honest, not hidden: a commit with no test says so in its
+message and why. The gate treats an undeclared missing test as a failure and a declared
+one as a pass, so the verdict stays actionable.
 
 ## Runbook
 

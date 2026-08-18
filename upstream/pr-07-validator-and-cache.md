@@ -31,6 +31,11 @@ context — which is per-user state, not per-function state. Measured on the sam
 ~20MB peak, no crash, and throughput rises because the common case no longer rebuilds
 an interpreter per statement.
 
+Whether the context survived is observable from JavaScript, which is what
+`sql/pg_targeted_invalidation.sql` checks: anything held on `globalThis` lives in that
+context, so it is still there after unrelated DDL exactly when the context was not
+destroyed. Without the fix it reads `(gone)`.
+
 ## A replaced function kept running the old body elsewhere
 
 The cache is per session and there is no syscache invalidation callback, so
@@ -51,4 +56,7 @@ function's name.
 - `Invalidate only the replaced function, not the whole context cache`
 - `Detect a stale cached function instead of running the old body`
 
-Every commit builds and passes the full suite on its own, on PostgreSQL 16, 17 and 18.
+Every commit in this series builds from clean and passes the full ordered suite on its
+own, verified per commit on PostgreSQL 17. The tip is additionally green on PostgreSQL
+16, 17, 18 and 19beta3 — the versions this repository's CI matrix builds — with
+`pljs.memory_limit=64`, and under AddressSanitizer with no reports.
