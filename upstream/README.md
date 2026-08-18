@@ -164,12 +164,17 @@ operation that produces them. Also required before sending each PR:
 and requires the tests to fail. A commit whose own test still passes without its code has
 shipped no protection. Running it changed the series materially:
 
-| | before | after |
+| commits that touch `src/` | before (42) | after (43) |
 |---|---|---|
-| discriminating | 22 | **30** |
-| passes without its fix | 5 | **0** |
-| no test, with a stated reason | 1 | **12** |
-| no test, undeclared | 14 | **0** |
+| its own test fails without it | 22 | **30** |
+| its own test passes without it | 5 | **0** |
+| has a test that states it cannot discriminate | 1 | **2** |
+| has no test, and says why in the message | 0 | **11** |
+| has no test, no explanation | 14 | **0** |
+
+`tools/check-src-discrimination.sh` exits 0 on the finished series. The count rises by one
+between the columns because the PostgreSQL 19 build fix was added afterwards; its stated
+reason is that a compile failure has no SQL-level observable.
 
 Four things it caught that per-commit greenness did not:
 
