@@ -1,6 +1,6 @@
 # Fix prepared-plan and cursor lifetimes
 
-Five fixes to how long a prepared plan and its portal live, and where their memory
+Six fixes to how long a prepared plan and its portal live, and where their memory
 comes from.
 
 Plan data was allocated in the caller's short-lived context while the plan itself was
@@ -25,6 +25,12 @@ the `CachedPlanSource` and does not appear to dereference the plansource during 
 fetch. The fix rests on the documented contract, not on a crash, and the test says so
 rather than implying otherwise.
 
+`pljs_plan_free()` is reachable from JavaScript and `SPI_freeplan()` raises on an
+invalid plan pointer, so the release path is guarded too: the opaque pointer is cleared
+before the free and the free runs under `PG_TRY`. Letting that error out would
+`siglongjmp` past QuickJS's live frames, and clearing first means a failed free cannot
+leave the handle pointing at a plan the finalizer would try again.
+
 ## Commits
 
 - `Allocate prepared plan data in CacheMemoryContext`
@@ -32,5 +38,6 @@ rather than implying otherwise.
 - `Reclaim prepared-statement plans with a GC finalizer`
 - `Free the cursor's parameter arrays and mark the portal volatile`
 - `Keep the prepared plan alive for the lifetime of its cursor`
+- `Guard the plan-release path against an error escaping into QuickJS`
 
 Every commit builds and passes the full suite on its own, on PostgreSQL 16, 17 and 18.

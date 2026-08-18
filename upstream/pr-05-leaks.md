@@ -1,4 +1,4 @@
-# Fix six allocation and reference leaks
+# Fix five allocation and reference leaks
 
 None of these is visible in a single call; all of them accumulate in a long-lived
 backend.
@@ -13,13 +13,7 @@ The rest: the SPI plan and parameter list allocated per iteration of
 both — a short-lived child context deleted unconditionally replaces the per-path frees;
 the property-name table from `JS_GetOwnPropertyNames()` and its atoms were dropped on
 the floor during object key enumeration; two JavaScript references were taken and never
-released in the storage helpers; and the exception value was leaked on the interrupt
-path, where the `JS_FreeValue` sat after a report that does not return and so was dead
-code.
-
-The interrupt check is also widened here, from `QueryCancelPending || ProcDiePending`
-to include `InterruptPending`, so a lost client connection, a recovery conflict or an
-idle-in-transaction timeout unwinds JavaScript too.
+released in the storage helpers.
 
 ## Commits
 
@@ -28,6 +22,5 @@ idle-in-transaction timeout unwinds JavaScript too.
 - `Free the property-name table from JS_GetOwnPropertyNames`
 - `Release the per-column JSValue in the composite conversion loops`
 - `Free the SPI plan and parameters when a parameterised execute raises`
-- `Widen the interrupt check, and stop leaking the exception value`
 
 Every commit builds and passes the full suite on its own, on PostgreSQL 16, 17 and 18.

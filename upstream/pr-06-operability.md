@@ -24,6 +24,12 @@ pljs no longer installs handlers. The interrupt handler reads `QueryCancelPendin
 than a JavaScript one. The vendored QuickJS marks the interrupt uncatchable, so
 `try { while(true){} } catch(e) {}` cannot defeat it.
 
+The interrupt check is widened at the same time, from `QueryCancelPending ||
+ProcDiePending` to include `InterruptPending`, so a lost client connection, a recovery
+conflict or an idle-in-transaction timeout also unwinds JavaScript. Those paths were
+additionally leaking the exception value: the `JS_FreeValue` sat after a report that does
+not return, so it was dead code.
+
 ## The JavaScript stack budget was measured from the wrong place
 
 `JS_NewRuntime()` records the C-stack top once, in `_PG_init`, and the budget is sized
@@ -50,6 +56,7 @@ catchable, since nothing has changed at that point.
 ## Commits
 
 - `Honor query cancellation instead of hijacking backend signals`
+- `Widen the interrupt check, and stop leaking the exception value`
 - `Bound the JavaScript stack size explicitly`
 - `Re-anchor the JavaScript stack budget at each entry into JavaScript`
 - `Make the derived stack budget observable in the regression suite`

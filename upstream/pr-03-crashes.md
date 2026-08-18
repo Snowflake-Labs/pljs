@@ -1,4 +1,4 @@
-# Fix nine ways a pljs function can take down the backend
+# Fix eight ways a pljs function can take down the backend
 
 Each of these terminates the connection, and most reproduce from plain SQL. Grouped
 because they share a cause — PostgreSQL error handling and QuickJS reference counting
@@ -22,18 +22,12 @@ connect to SPI; `call_trigger()` never did. So not only DDL but a bare
 Nothing in the suite covered it, because the existing trigger tests only inspect
 `NEW`/`OLD` and the `TG_*` variables.
 
-**Deep jsonb nesting crashed the process.** Conversion recursed without a bound. It is
-now bounded by `check_stack_depth()`, which honours `max_stack_depth` instead of a
-fixed limit, and the frame's property table and atoms are released when a raise
-unwinds through it — the guard previously leaked them.
-
 ## The rest
 
 A stale `SPI_tuptable` reused after `pljs.commit()`; a syscache pin held past the point
 it was needed and leaked on one branch; a `pg_language` tuple read through
 `Form_pg_database` (harmless only because both catalogs begin with an `Oid` at the same
-offset); errors escaping `pljs.return_next` and two other JS-callable entry points by
-`siglongjmp`; a cursor error tearing down the whole SPI connection instead of the
+offset); errors escaping `pljs.return_next` by `siglongjmp`; a cursor error tearing down the whole SPI connection instead of the
 statement; and the validator leaking its compiled function and context.
 
 ## Commits
@@ -44,8 +38,6 @@ statement; and the validator leaking its compiled function and context.
 - `Guard cursor fetch, move and close with an internal subtransaction`
 - `Flush the error state in every PG_CATCH that reports to JavaScript`
 - `Do not let a PostgreSQL error longjmp out of pljs.return_next`
-- `Guard the two remaining JS-callable entry points against escaping errors`
-- `Bound jsonb nesting with check_stack_depth and free the frame on a raise`
 - `Take a reference before handing a cached function to JavaScript`
 - `Connect to SPI in call_trigger, so a trigger can query`
 - `Free the compiled function and context in the validator`

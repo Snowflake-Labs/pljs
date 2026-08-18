@@ -4,7 +4,7 @@ sha	target	subject
 06f6d90	PR2-error-reporting	fix: call FlushErrorState() after CopyErrorData() in pljs_execute PG_CATCH
 6948feb	PR3-crashes	fix: call SPI_freetuptable() after result conversion in pljs_execute
 01b942f	HELD-data-format	fix: make NULL bind parameters work in pljs.execute
-6ecd384	PR8-null-record	fix: avoid PG_RETURN_NULL() with NULL fcinfo in remaining edge cases
+6ecd384	HELD-data-format	fix: avoid PG_RETURN_NULL() with NULL fcinfo in remaining edge cases
 aee8377	PR4-lifetimes	fix: allocate prepared plan data in CacheMemoryContext
 2b10d94	PR2-error-reporting	fix: preserve JS error message and Postgres detail across SPI boundary
 55c1199	FOLD-tests	test: lock down int64/BigInt losslessness through pljs.execute
@@ -29,7 +29,7 @@ cd99c59	PR1-corruption	fix: copy prosrc with pstrdup instead of fixed-length mem
 164515a	PR6-operability	fix: re-apply pljs.memory_limit to the live runtime on SET
 20af343	HELD-data-format	fix: reject unconvertible JS values instead of silently corrupting/dropping them
 4ee9521	HELD-data-format	fix: stop corrupting invalid Dates and multidimensional arrays; add type matrix
-a8ebc82	PR8-null-record	fix: treat undefined array elements as NULL without nulling the whole array
+a8ebc82	HELD-data-format	fix: treat undefined array elements as NULL without nulling the whole array
 46539fb	FOLD-tests	test: add memory-growth and low-memory determinism regression tests
 9c8fa85	FOLD-tests	test: add cache-invalidation regression test
 da2148a	PR5-leaks	fix: free per-iteration SPI plan and paramlist in pljs.execute/plan.execute
@@ -38,14 +38,14 @@ da2148a	PR5-leaks	fix: free per-iteration SPI plan and paramlist in pljs.execute
 7b31b49	HELD-data-format	fix: make the JavaScript to json/jsonb conversion memory-safe and lossless
 c97d786	HELD-data-format	fix: resolve a window function's polymorphic argument types
 fbb43b9	HELD-data-format	fix: convert unhandled types through their I/O functions, not their bytes
-86c56b8	PR8-null-record	fix: report SQL NULL through fcinfo on the composite, record and fallback paths
-9bd0c78	PR8-null-record	fix: let a null/undefined value be SQL NULL for an array type
-2b78a71	PR8-null-record	fix: read the column value from a row object for a single-column set
+86c56b8	HELD-data-format	fix: report SQL NULL through fcinfo on the composite, record and fallback paths
+9bd0c78	HELD-data-format	fix: let a null/undefined value be SQL NULL for an array type
+2b78a71	HELD-data-format	fix: read the column value from a row object for a single-column set
 b7112ae	HELD-data-format	fix: parse a JavaScript string into int2/int4/int8/numeric exactly
 0d973d0	HELD-data-format	fix: reject out-of-range integers instead of wrapping them silently
 7feedf5	PR8-null-record	fix: emit a NULL row for return_next(null) on a composite set
 4d7b1c9	HELD-data-format	fix: parse a JavaScript string bound to bool instead of coercing truthiness
-5a970de	PR8-null-record	fix: convert an undefined jsonb array element to null instead of dropping it
+5a970de	HELD-data-format	fix: convert an undefined jsonb array element to null instead of dropping it
 4f87f04	HELD-data-format	fix: surface bytea as a Uint8Array so its bytes survive JavaScript
 0dc1d21	PR2-error-reporting	fix: say which column and which properties mismatched in return_next
 b9efd25	HELD-data-format	fix: dispatch array conversion on the SQL type, fixing RETURNS jsonb[]
@@ -56,7 +56,7 @@ dcb4fdd	FORK-ONLY-tooling	test: add a mixed success/failure memory harness drive
 a33c84f	PR4-lifetimes	fix: free the cursor open's parameter arrays and mark the portal volatile
 1207177	PR5-leaks	fix: free the SPI plan and parameters when a parameterised execute raises
 1c6c2fd	PR4-lifetimes	fix: keep the prepared plan alive for the lifetime of its cursor
-7bd30b6	PR3-crashes	fix: bound jsonb nesting with check_stack_depth and free the frame on a raise
+7bd30b6	HELD-data-format	fix: bound jsonb nesting with check_stack_depth and free the frame on a raise
 fb7eaaa	PR3-crashes	fix: read pg_language through its own struct and release the pg_proc pin
 b3a9ac0	PR2-error-reporting	fix: say a record-returning function needs a column definition list
 b46a78c	PR6-operability	fix: re-throw a real commit/rollback failure instead of resuming JavaScript

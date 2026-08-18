@@ -14,8 +14,8 @@ in advance so the long run is mechanical.
 
 | bucket | commits |
 |---|---|
-| upstream now, 8 PRs | **50** |
-| held — breaking data-format changes | 20 |
+| upstream now, 8 PRs | **43** |
+| held — breaking data-format changes, and the null/record fixes entangled with them | 27 |
 | folded into the fix they test or document | 17 |
 | never leaves the fork (tooling, its repairs, one self-inflicted fix, fork CI) | 13 |
 
