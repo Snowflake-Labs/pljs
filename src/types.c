@@ -1047,18 +1047,13 @@ static inline Datum pljs_null_datum(bool *is_null, FunctionCallInfo fcinfo) {
 }
 
 /**
- * @brief Converts a JavaScript string into a #Datum through the target type's
- * text input function.
+ * @brief Parse a JavaScript string with a PostgreSQL type's input function.
  *
- * The input function parses the full decimal text exactly, and raises on
- * malformed or out-of-range input.  That is the only correct way to turn a
- * *string* into a numeric datum: QuickJS's numeric coercion
- * (JS_ToInt32/JS_ToInt64/JS_ToFloat64) goes through an IEEE-754 double, which
- * silently loses precision above 2^53 -- "9223372036854775807" arrives as
- * INT64_MIN, and "123456789012345678" lands two off.
- *
- * It is also what plv8 does, so a procedure that binds a numeric string behaves
- * the same on both.
+ * QuickJS's numeric/boolean coercions do not parse SQL text: JS_ToBool()
+ * treats every non-empty string as true, and the numeric conversions go
+ * through an IEEE-754 double. The input function reads the text exactly
+ * as a SQL literal of that type would, and raises on anything it cannot
+ * accept. That is also what plv8 does.
  *
  * @param typid #Oid - target type
  * @param val #JSValue - the JavaScript string to parse
@@ -1288,6 +1283,21 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
   }
 
   case BOOLOID: {
+    /*
+     * A string is parsed by bool's input function, not coerced with
+     * JS_ToBool(). JS_ToBool() reports every non-empty string as true, so
+     * "false", "f", "no" and "0" all became true while "" became false —
+     * the opposite of what the text means. The input function accepts
+     * exactly what SQL accepts and raises on anything else.
+     *
+     * This is a behaviour change: a bind or return of the string "false"
+     * used to store true. A JavaScript boolean, and the truthiness of any
+     * non-string, are untouched.
+     */
+    if (JS_IsString(val)) {
+      return pljs_string_to_datum_via_input(BOOLOID, val, ctx);
+    }
+
     int8_t in = JS_ToBool(ctx, val);
     PG_RETURN_BOOL(in);
     break;
