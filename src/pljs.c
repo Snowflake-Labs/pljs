@@ -127,7 +127,19 @@ void pljs_guc_init(void) {
  * @param ctx #JSContext - Javascript context with the error
  * @returns @c char * as an error message
  */
-static char *dump_error(JSContext *ctx) {
+/*
+ * Extract the current JavaScript exception.
+ *
+ * Returns a palloc'd string suitable for errdetail(): the stringified error
+ * followed by its stack trace.  When message_out is non-NULL it is set to a
+ * palloc'd copy of the error's own `message` property (or the stringified
+ * throw value for non-Error throws), so callers can surface that as the
+ * primary errmsg() the way plv8 does, instead of a generic "execution error".
+ * Preserving the message here is what lets a coded error (e.g. the "[CODE] "
+ * prefix embedded by the mirror procedures) survive across a nested
+ * pljs.execute()/SPI boundary.
+ */
+static char *dump_error(JSContext *ctx, char **message_out, char **detail_out) {
   JSValue exception_val, val;
   const char *stack;
   const char *str;
@@ -135,12 +147,24 @@ static char *dump_error(JSContext *ctx) {
   char *ret = NULL;
   size_t s1, s2;
 
+  if (message_out) {
+    *message_out = NULL;
+  }
+
+  if (detail_out) {
+    *detail_out = NULL;
+  }
+
   exception_val = JS_GetException(ctx);
 
   /* In the case of OOM, a null exception is thrown. */
   if (JS_IsNull(exception_val)) {
     char *oom = palloc(14);
     strcpy(oom, "out of memory");
+
+    if (message_out) {
+      *message_out = pstrdup("out of memory");
+    }
 
     JS_FreeValue(ctx, exception_val);
 
@@ -153,6 +177,57 @@ static char *dump_error(JSContext *ctx) {
   if (!str) {
     elog(DEBUG3, "error thrown but no error message");
     return NULL;
+  }
+
+  if (detail_out && is_error) {
+    /*
+     * Carry a Postgres detail forward when the error came from a caught SPI
+     * error (see js_throw_error_data): callers surface it as errdetail so the
+     * original explanation survives a nested pljs.execute() re-raise.
+     */
+    JSValue detailval = JS_GetPropertyStr(ctx, exception_val, "detail");
+
+    if (!JS_IsUndefined(detailval)) {
+      const char *detailstr = JS_ToCString(ctx, detailval);
+
+      if (detailstr && detailstr[0]) {
+        *detail_out = pstrdup(detailstr);
+      }
+
+      if (detailstr) {
+        JS_FreeCString(ctx, detailstr);
+      }
+    }
+
+    JS_FreeValue(ctx, detailval);
+  }
+
+  if (message_out) {
+    /*
+     * Prefer the Error's own `message` property; fall back to the stringified
+     * throw value for non-Error throws or a missing/empty message.
+     */
+    if (is_error) {
+      JSValue msgval = JS_GetPropertyStr(ctx, exception_val, "message");
+
+      if (!JS_IsUndefined(msgval)) {
+        const char *msgstr = JS_ToCString(ctx, msgval);
+
+        if (msgstr && msgstr[0]) {
+          *message_out = pstrdup(msgstr);
+        }
+
+        if (msgstr) {
+          JS_FreeCString(ctx, msgstr);
+        }
+      }
+
+      JS_FreeValue(ctx, msgval);
+    }
+
+    if (*message_out == NULL) {
+      *message_out = pstrdup(str);
+    }
   }
 
   if (!is_error) {
@@ -177,6 +252,25 @@ static char *dump_error(JSContext *ctx) {
 
   return ret;
 }
+
+/*
+ * Report a JavaScript exception as a PostgreSQL error.
+ *
+ * `message` and `detail` are dump_error()'s out-parameters; `fallback` is used when
+ * the exception carried no message of its own, which is why the empty-string check
+ * matters and why it lives in one place rather than at every report site.
+ *
+ * Does not return.
+ */
+pg_noreturn static void pljs_ereport_js_error(const char *message,
+                                             const char *pg_detail,
+                                             const char *detail,
+                                             const char *fallback) {
+  ereport(ERROR, (errmsg("%s", (message && message[0]) ? message : fallback),
+                  errdetail("%s", (pg_detail && pg_detail[0]) ? pg_detail : detail)));
+  pg_unreachable();
+}
+
 
 static void signal_handler(int sig_num) {
   os_pending_signals |= ((uint64_t)1 << sig_num);
@@ -398,8 +492,9 @@ static void setup_start_proc(JSContext *ctx) {
   } else {
     JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 0, NULL);
     if (JS_IsException(ret)) {
-      ereport(ERROR, (errmsg("start proc execution error"),
-                      errdetail("%s", dump_error(ctx))));
+      char *message = NULL, *pg_detail = NULL;
+      char *detail = dump_error(ctx, &message, &pg_detail);
+      pljs_ereport_js_error(message, pg_detail, detail, "start proc execution error");
     }
   }
 }
@@ -741,8 +836,9 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
                         JS_EVAL_FLAG_COMPILE_ONLY);
 
   if (JS_IsException(val)) {
-    ereport(ERROR,
-            (errmsg("execution error"), errdetail("%s", dump_error(ctx))));
+    char *message = NULL, *pg_detail = NULL;
+    char *detail = dump_error(ctx, &message, &pg_detail);
+    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
   }
 
   // call validator can release the context
@@ -820,8 +916,9 @@ JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
 
     return val;
   } else {
-    ereport(ERROR, (errmsg("execution error"),
-                    errdetail("%s", dump_error(context->ctx))));
+    char *message = NULL, *pg_detail = NULL;
+    char *detail = dump_error(context->ctx, &message, &pg_detail);
+    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
 
     return JS_UNDEFINED;
   }
@@ -854,9 +951,9 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
   if (!JS_IsException(val)) {
     pfree(src.data);
   } else {
-
-    ereport(ERROR,
-            (errmsg("execution error"), errdetail("%s", dump_error(ctx))));
+    char *message = NULL, *pg_detail = NULL;
+    char *detail = dump_error(ctx, &message, &pg_detail);
+    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
   }
 }
 
@@ -969,8 +1066,9 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
       JS_Call(context->ctx, context->js_function, JS_UNDEFINED, 10, argv);
 
   if (JS_IsException(ret)) {
-    ereport(ERROR, (errmsg("execution error"),
-                    errdetail("%s", dump_error(context->ctx))));
+    char *message = NULL, *pg_detail = NULL;
+    char *detail = dump_error(context->ctx, &message, &pg_detail);
+    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
 
     JS_FreeValue(context->ctx, ret);
 
@@ -1046,11 +1144,12 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
   SPI_finish();
 
   if (JS_IsException(ret)) {
-    char *error_message = dump_error(context->ctx);
+    char *message = NULL, *pg_detail = NULL;
+    char *error_message = dump_error(context->ctx, &message, &pg_detail);
 
     JS_FreeValue(context->ctx, ret);
 
-    ereport(ERROR, (errmsg("execution error"), errdetail("%s", error_message)));
+    pljs_ereport_js_error(message, pg_detail, error_message, "execution error");
 
     /* Shuts up the compiler, since ereports of ERROR stop execution. */
     return (Datum)0;
@@ -1059,7 +1158,22 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
 
     if (rettype == RECORDOID) {
       TupleDesc tupdesc;
-      get_call_result_type(fcinfo, &rettype, &tupdesc);
+
+      /*
+       * Check the status rather than discarding it.  TYPEFUNC_RECORD means the
+       * caller did not supply a column definition list, and tupdesc comes back
+       * NULL; pljs_jsvalue_to_record() then reached
+       * lookup_rowtype_tupdesc(RECORDOID, -1) and raised "record type has not
+       * been registered", which is an unhelpful way to say "you forgot
+       * AS (a int, b text)".
+       */
+      if (get_call_result_type(fcinfo, &rettype, &tupdesc) != TYPEFUNC_COMPOSITE) {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("a function returning \"record\" needs a column "
+                        "definition list"),
+                 errhint("Call it as ... AS (column_name data_type, ...).")));
+      }
 
       pljs_type type;
       pljs_type_fill(&type, rettype);
@@ -1171,11 +1285,12 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
   SPI_finish();
 
   if (JS_IsException(ret)) {
-    char *error_message = dump_error(context->ctx);
+    char *message = NULL, *pg_detail = NULL;
+    char *error_message = dump_error(context->ctx, &message, &pg_detail);
 
     JS_FreeValue(context->ctx, ret);
 
-    ereport(ERROR, (errmsg("execution error"), errdetail("%s", error_message)));
+    pljs_ereport_js_error(message, pg_detail, error_message, "execution error");
 
     /* Shuts up the compiler, since ereports of ERROR stop execution. */
     return (Datum)0;
@@ -1275,6 +1390,48 @@ JSValue js_throw(const char *message, JSContext *ctx) {
   JSValue error = JS_NewError(ctx);
   JSValue message_value = JS_NewString(ctx, message);
   JS_SetPropertyStr(ctx, error, "message", message_value);
+
+  return JS_Throw(ctx, error);
+}
+
+/*
+ * Like js_throw(), but also attaches the Postgres error's detail, hint and
+ * SQLSTATE to the JS error object (matching plv8).  Used when a Postgres
+ * error caught during SPI execution is surfaced to JavaScript, so the full
+ * error envelope survives into JS and can be re-raised faithfully across a
+ * nested pljs.execute() boundary instead of collapsing to the message alone.
+ */
+JSValue js_throw_error_data(ErrorData *edata, JSContext *ctx) {
+  JSValue error = JS_NewError(ctx);
+
+  JS_SetPropertyStr(ctx, error, "message",
+                    JS_NewString(ctx, edata->message ? edata->message : ""));
+
+  if (edata->detail) {
+    JS_SetPropertyStr(ctx, error, "detail", JS_NewString(ctx, edata->detail));
+  }
+
+  if (edata->hint) {
+    JS_SetPropertyStr(ctx, error, "hint", JS_NewString(ctx, edata->hint));
+  }
+
+  /*
+   * Expose the SQLSTATE under both names.
+   *
+   * The value has always been the five-character string rather than the packed
+   * integer -- unpack_sql_state() is applied here -- but the property was named
+   * `sqlerrcode`, which is PostgreSQL's internal name for the *packed* form.
+   * Every other PL calls it `sqlstate`, and that is the name a JavaScript author
+   * reaches for:
+   *
+   *     catch (e) { if (e.sqlstate === '23505') ... }
+   *
+   * `sqlerrcode` is kept so that existing code keeps working.
+   */
+  JS_SetPropertyStr(ctx, error, "sqlerrcode",
+                    JS_NewString(ctx, unpack_sql_state(edata->sqlerrcode)));
+  JS_SetPropertyStr(ctx, error, "sqlstate",
+                    JS_NewString(ctx, unpack_sql_state(edata->sqlerrcode)));
 
   return JS_Throw(ctx, error);
 }

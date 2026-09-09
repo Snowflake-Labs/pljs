@@ -39,9 +39,15 @@ endif
 REGRESS = init-extension function json jsonb json_conv types bytea context \
 	cursor array_spread plv8_regressions memory_limits inline composites \
 	trigger procedure find_function start_proc window regressions \
+	pg_flush_error_state \
 	currentresource \
 	pg_typedarray_views \
-	pg_find_function_no_perm
+	pg_find_function_no_perm \
+	pg_column_name_mismatch \
+	pg_record_no_column_list \
+	pg_error_envelope_fields \
+	pg_error_sqlstate \
+	pg_plan_argcount_sqlstate
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 
