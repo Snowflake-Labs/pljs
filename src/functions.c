@@ -12,6 +12,7 @@
 #include "utils/elog.h"
 #include "utils/fmgrprotos.h"
 #include "utils/palloc.h"
+#include "utils/memutils.h"
 #include "utils/resowner.h"
 #include "windowapi.h"
 
@@ -383,6 +384,62 @@ static int pljs_execute_params(const char *sql, JSValue params,
 }
 
 /**
+ * @brief Frees a #pljs_plan and everything it owns.
+ *
+ * Shared by the explicit `plan.free()` path and the GC finalizer.  All of the
+ * members live in long-lived contexts (the SPI plan is a saved plan, parstate
+ * and its param_types are in CacheMemoryContext), so this is safe to call at
+ * any time, including from a finalizer that may run outside a transaction.
+ * Note the previous free path leaked parstate->param_types; it is reclaimed
+ * here.
+ */
+static void pljs_free_plan_struct(pljs_plan *plan) {
+  if (plan == NULL) {
+    return;
+  }
+
+  if (plan->plan) {
+    SPI_freeplan(plan->plan);
+  }
+
+  if (plan->parstate) {
+    if (plan->parstate->param_types) {
+      pfree(plan->parstate->param_types);
+    }
+    pfree(plan->parstate);
+  }
+
+  pfree(plan);
+}
+
+/**
+ * @brief GC finalizer for the prepared-statement handle class.
+ *
+ * Without this, a plan object that JavaScript prepares but never explicitly
+ * `.free()`s leaks its saved SPI plan and CacheMemoryContext parstate for the
+ * life of the backend -- e.g. preparing 20k plans in a loop grew
+ * CacheMemoryContext from ~1MB to ~64MB with no way to reclaim it.  The
+ * finalizer runs when the handle becomes unreachable so the leak is bounded by
+ * the GC interval instead of being permanent.  plan.free() clears the opaque,
+ * so this is a no-op after an explicit free (no double free).
+ */
+static void pljs_plan_handle_finalizer(JSRuntime *rt, JSValue val) {
+  pljs_plan *plan = JS_GetOpaque(val, js_prepared_statement_handle_id);
+
+  pljs_free_plan_struct(plan);
+}
+
+static const JSClassDef pljs_plan_handle_class = {
+    "PljsPreparedStatement",
+    .finalizer = pljs_plan_handle_finalizer,
+};
+
+void pljs_register_js_classes(JSRuntime *runtime) {
+  JS_NewClassID(&js_prepared_statement_handle_id);
+  JS_NewClass(runtime, js_prepared_statement_handle_id, &pljs_plan_handle_class);
+}
+
+/**
  * @brief Javascript function `plan.execute`.
  *
  * Javascript function that executes a Postgres plan and returns
@@ -545,17 +602,37 @@ static JSValue pljs_plan_free(JSContext *ctx, JSValueConst this_val, int argc,
 
   plan = JS_GetOpaque(ptr, js_prepared_statement_handle_id);
 
-  if (plan) {
-    if (plan->plan) {
-      SPI_freeplan(plan->plan);
-    }
+  /*
+   * Clear the opaque *before* freeing, and free under PG_TRY.
+   *
+   * SPI_freeplan() raises on an invalid plan pointer, and this is a C function
+   * QuickJS called, so letting that error out siglongjmps past QuickJS's live
+   * stack frames -- see pljs_return_next() for what that costs.  Clearing the
+   * opaque first also means a failed free cannot leave the handle pointing at a
+   * plan the GC finalizer would then try to free again.
+   */
+  JS_SetOpaque(ptr, NULL);
 
-    if (plan->parstate) {
-      pfree(plan->parstate);
-    }
-
-    pfree(plan);
+  PG_TRY();
+  {
+    pljs_free_plan_struct(plan);
   }
+  PG_CATCH();
+  {
+    MemoryContext m_mcontext = CurrentMemoryContext;
+    ErrorData *edata = CopyErrorData();
+    JSValue error = js_throw_error_data(edata, ctx);
+
+    FlushErrorState();
+    FreeErrorData(edata);
+    MemoryContextSwitchTo(m_mcontext);
+
+    JS_SetPropertyStr(ctx, this_val, "plan", JS_NULL);
+    JS_FreeValue(ctx, ptr);
+
+    return error;
+  }
+  PG_END_TRY();
 
   JS_SetPropertyStr(ctx, this_val, "plan", JS_NULL);
 
@@ -624,11 +701,25 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
   sql = JS_ToCString(ctx, argv[0]);
 
+  /*
+   * Allocate parstate in CacheMemoryContext so it survives beyond the current
+   * call_function execution_context (which gets deleted on return).
+   * param_types is palloc'd via parstate->memory_context so it must point to
+   * the same long-lived context.  We allocate it *before* PG_TRY so the
+   * pointer is stable for the cleanup path (and not at risk of being clobbered
+   * across the longjmp), and so the PG_CATCH branch can free it: because it
+   * lives in the permanent CacheMemoryContext, a failed SPI_prepare would
+   * otherwise leak it (and its param_types) for the life of the backend.
+   */
+  if (argc > 1) {
+    parstate =
+        MemoryContextAllocZero(CacheMemoryContext, sizeof(pljs_param_state));
+    parstate->memory_context = CacheMemoryContext;
+  }
+
   PG_TRY();
   {
-    if (argc > 1) {
-      parstate = palloc0(sizeof(pljs_param_state));
-      parstate->memory_context = CurrentMemoryContext;
+    if (parstate) {
       initial = SPI_prepare_params(sql, pljs_variable_param_setup, parstate, 0);
     } else {
       initial = SPI_prepare(sql, nparams, types);
@@ -640,6 +731,17 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
   PG_CATCH();
   {
+    if (parstate) {
+      if (parstate->param_types) {
+        pfree(parstate->param_types);
+      }
+      pfree(parstate);
+    }
+
+    if (types != NULL) {
+      pfree(types);
+    }
+
     if (cleanup_params) {
       JS_FreeValue(ctx, params);
     }
@@ -660,7 +762,8 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
   JS_SetPropertyFunctionList(ctx, ret, js_plan_funcs, 4);
 
-  plan = palloc(sizeof(pljs_plan));
+  /* Allocate plan in CacheMemoryContext for the same reason as parstate. */
+  plan = MemoryContextAlloc(CacheMemoryContext, sizeof(pljs_plan));
 
   plan->parstate = parstate;
   plan->plan = saved;
@@ -697,7 +800,14 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
   char *nulls = NULL;
   int nparams = 0;
   int argcount;
-  Portal cursor;
+  /*
+   * Assigned inside the PG_TRY below and read after PG_END_TRY, which is the
+   * pattern PostgreSQL's coding conventions require volatile for: without it a
+   * compiler is free to keep it in a register that the longjmp clobbers.  Safe
+   * in practice today because the read only happens on the non-longjmp path,
+   * but that is a property of the current control flow rather than of the code.
+   */
+  Portal volatile cursor = NULL;
   bool cleanup_params = false;
 
   JSValue ptr = JS_GetPropertyStr(ctx, this_val, "plan");
@@ -810,6 +920,18 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
       JS_FreeValue(ctx, params);
     }
 
+    /*
+     * This path rolls back only an internal subtransaction and then returns a
+     * JavaScript error, so the enclosing transaction -- and therefore
+     * CurrentMemoryContext -- lives on.  Nothing else will reclaim these.
+     */
+    if (values) {
+      pfree(values);
+    }
+    if (nulls) {
+      pfree(nulls);
+    }
+
     return error;
   }
 
@@ -823,8 +945,42 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
   JS_SetPropertyStr(ctx, ret, "name", str);
   JS_SetPropertyFunctionList(ctx, ret, js_cursor_funcs, 4);
 
+  /*
+   * Keep the plan handle reachable from the cursor.
+   *
+   * pljs_plan_handle_finalizer() calls SPI_freeplan(), and it runs as soon as
+   * the plan handle becomes unreachable -- which the natural idiom makes
+   * immediate:
+   *
+   *   var c = pljs.prepare('select ... where id = $1', ['int']).cursor([1]);
+   *   while (c.fetch()) { ... }
+   *
+   * The plan object is unreachable from that second line on, but the portal
+   * opened from it is still live and is re-entered by fetch/move/close.
+   * SPI_freeplan -> DropCachedPlan sets plansource->magic = 0 and deletes the
+   * plansource's context, and SPI_freeplan's own contract says a plan in use
+   * must not be freed.  The portal holds a refcount on the CachedPlan, not on
+   * the CachedPlanSource, so whether that crashes or merely reads freed memory
+   * depends on plancache internals that are not part of any contract.
+   *
+   * Holding an owned reference here means the plan cannot be collected before
+   * the cursor is, so the finalizer cannot run underneath an open portal.
+   * JS_GetPropertyStr returns a new owned reference and JS_SetPropertyStr
+   * consumes it, so this transfers cleanly without touching the error paths
+   * above.
+   */
+  JS_SetPropertyStr(ctx, ret, "plan", JS_GetPropertyStr(ctx, this_val, "plan"));
+
   if (cleanup_params) {
     JS_FreeValue(ctx, params);
+  }
+
+  /* The portal holds its own copies; these were only needed for the open. */
+  if (values) {
+    pfree(values);
+  }
+  if (nulls) {
+    pfree(nulls);
   }
 
   return ret;
@@ -1772,8 +1928,6 @@ static JSValue pljs_get_window_object(JSContext *ctx, JSValueConst this_val,
 
 static JSValue pljs_subtransaction(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv) {
-  JSValue result = JS_UNDEFINED;
-
   if (argc < 1) {
     return JS_UNDEFINED;
   }
@@ -1789,21 +1943,81 @@ static JSValue pljs_subtransaction(JSContext *ctx, JSValueConst this_val,
   ResourceOwner m_resowner = CurrentResourceOwner;
   MemoryContext m_mcontext = CurrentMemoryContext;
 
-  BeginInternalSubTransaction(NULL);
-  MemoryContextSwitchTo(m_mcontext);
+  /*
+   * How far we got, so the PG_CATCH knows what it is cleaning up.  Assigned in
+   * the PG_TRY and read in the PG_CATCH, hence volatile.
+   *
+   *   0 - no subtransaction started
+   *   1 - subtransaction open, running the callback
+   *   2 - committing or rolling it back
+   */
+  volatile int stage = 0;
+  volatile JSValue result = JS_UNDEFINED;
 
-  result = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
+  /*
+   * A PostgreSQL error must not escape this function.  pljs.subtransaction() is
+   * a C function that QuickJS called, so an ereport(ERROR) here siglongjmps past
+   * QuickJS's live stack frames and leaves the runtime's frame list pointing at
+   * dead ones; the session then crashes later, in whatever next builds an
+   * Error's backtrace.  See pljs_return_next() for the full mechanism.
+   *
+   * BeginInternalSubTransaction() and ReleaseCurrentSubTransaction() both raise
+   * in ordinary operation, so this needs no bad input to reach.
+   */
+  PG_TRY();
+  {
+    BeginInternalSubTransaction(NULL);
+    stage = 1;
+    MemoryContextSwitchTo(m_mcontext);
 
-  bool success = !JS_IsException(result);
+    result = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
 
-  if (success) {
-    ReleaseCurrentSubTransaction();
-  } else {
-    RollbackAndReleaseCurrentSubTransaction();
+    bool success = !JS_IsException(result);
+
+    stage = 2;
+
+    if (success) {
+      ReleaseCurrentSubTransaction();
+    } else {
+      RollbackAndReleaseCurrentSubTransaction();
+    }
+
+    MemoryContextSwitchTo(m_mcontext);
+    CurrentResourceOwner = m_resowner;
   }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(m_mcontext);
 
-  MemoryContextSwitchTo(m_mcontext);
-  CurrentResourceOwner = m_resowner;
+    /*
+     * A failure while committing or rolling the subtransaction back leaves no
+     * valid state to resume into, exactly as for pljs.commit(): re-throw rather
+     * than handing back a catchable exception and letting the function continue.
+     */
+    if (stage == 2) {
+      CurrentResourceOwner = m_resowner;
+      PG_RE_THROW();
+    }
+
+    if (stage == 1) {
+      RollbackAndReleaseCurrentSubTransaction();
+      MemoryContextSwitchTo(m_mcontext);
+    }
+
+    CurrentResourceOwner = m_resowner;
+
+    JS_FreeValue(ctx, result);
+
+    ErrorData *edata = CopyErrorData();
+    JSValue error = js_throw_error_data(edata, ctx);
+
+    FlushErrorState();
+    FreeErrorData(edata);
+    MemoryContextSwitchTo(m_mcontext);
+
+    return error;
+  }
+  PG_END_TRY();
 
   return result;
 }
