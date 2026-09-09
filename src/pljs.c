@@ -96,6 +96,23 @@ void _PG_init(void) {
 }
 
 /**
+ * @brief Assign hook for pljs.memory_limit.
+ *
+ * Re-applies the limit to the live QuickJS runtime when the GUC is changed at
+ * runtime (SET pljs.memory_limit = ...).  Without this the GUC value changed
+ * but the interpreter kept whatever limit was installed in _PG_init (the value
+ * present when pljs was first loaded), so a runtime SET silently had no effect
+ * and could not be used to contain a misbehaving function in a running backend.
+ * At initial GUC definition (boot value) rt is still NULL, so this is a no-op
+ * then and _PG_init installs the load-time value explicitly.
+ */
+static void pljs_assign_memory_limit(int newval, void *extra) {
+  if (rt != NULL && newval > 0) {
+    JS_SetMemoryLimit(rt, (size_t)newval * 1024 * 1024);
+  }
+}
+
+/**
  * @brief Set up the GUCs.
  *
  * Sets up the GUCs that help define the behavior of the interpreter.
@@ -115,7 +132,7 @@ void pljs_guc_init(void) {
                           gettext_noop("Runtime limit in MBytes"),
                           gettext_noop("The default value is 512 MB"),
                           (int *)&configuration.memory_limit, 512, 64, 3096,
-                          PGC_SUSET, 0, NULL, NULL, NULL);
+                          PGC_SUSET, 0, NULL, pljs_assign_memory_limit, NULL);
 
   DefineCustomStringVariable(
       "pljs.start_proc",
@@ -605,7 +622,19 @@ pljs_storage *pljs_storage_for_context(JSContext *ctx) {
 
   JSValue pljs = JS_GetPropertyStr(ctx, global_obj, "pljs");
 
+  /*
+   * JS_GetOpaque only reads a pointer off the object; it does not keep the
+   * object alive.  Both global_obj and pljs are fresh references returned by
+   * the getters above, so we must drop them here.  The pljs object stays
+   * alive via the global object's property table.  Without this, every call
+   * (and this is a hot path: return_next, window helpers, each function
+   * invocation) leaks a reference and monotonically bumps the singletons'
+   * refcounts for the life of the backend.
+   */
   pljs_storage *storage = JS_GetOpaque(pljs, js_pljs_storage_id);
+
+  JS_FreeValue(ctx, pljs);
+  JS_FreeValue(ctx, global_obj);
 
   return storage;
 }
@@ -650,6 +679,11 @@ static void store_storage_in_context(pljs_context *context,
 
   // Attach storage to the pljs object.
   JS_SetOpaque(pljs, storage);
+
+  // Drop the fresh references returned by the getters above (see
+  // pljs_storage_for_context); the pljs object survives via the global object.
+  JS_FreeValue(context->ctx, pljs);
+  JS_FreeValue(context->ctx, global_obj);
 }
 
 /**

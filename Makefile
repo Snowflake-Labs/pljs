@@ -44,8 +44,13 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	currentresource \
 	pg_typedarray_views \
 	pg_find_function_no_perm pg_cursor_error_recovery pg_prepared_plan_gc \
+	pg_memory_limit_set \
+	pg_param_plan_leak \
+	pg_object_keys_leak \
 	pg_errordata_stack \
 	pg_column_name_mismatch \
+	pg_record_column_leak \
+	pg_param_plan_error_leak \
 	pg_cursor_plan_lifetime \
 	pg_record_no_column_list \
 	pg_return_next_error_frames \

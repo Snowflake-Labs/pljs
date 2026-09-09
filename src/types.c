@@ -666,6 +666,8 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
     return false;
   }
 
+  bool result = true;
+
   for (int16 c = 0; c < tupdesc->natts; c++) {
     if (TupleDescAttr(tupdesc, c)->attisdropped) {
       continue;
@@ -743,10 +745,26 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
       }
 
       return false;
+
+      result = false;
+      break;
     }
   }
 
-  return true;
+  /*
+   * JS_GetOwnPropertyNames() returns a js_malloc'd table plus one owned atom
+   * reference per entry; both must be released.  Otherwise every call -- e.g.
+   * every RETURNS TABLE / SETOF composite return_next() -- leaks the table
+   * (which counts against the QuickJS runtime memory limit) and an atom
+   * reference per property, and neither is reclaimed until the backend exits.
+   * A long-running backend therefore slowly exhausts pljs.memory_limit.
+   */
+  for (uint32_t i = 0; i < object_keys_length; i++) {
+    JS_FreeAtom(ctx, tab[i].atom);
+  }
+  js_free(ctx, tab);
+
+  return result;
 }
 
 /**
@@ -795,8 +813,19 @@ Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
 
     JSValue o = JS_GetPropertyStr(ctx, val, colname);
 
+    /*
+     * JS_GetPropertyStr() returns an owned reference, so it has to be released
+     * on every path out of this iteration -- including the null/undefined
+     * short-circuit below.  Leaking it costs one QuickJS reference per column
+     * per row, on every composite return and every return_next() of a row
+     * object, which is the hottest allocation path in the extension.  Because
+     * QuickJS runs on the libc allocator the loss is invisible to
+     * pg_backend_memory_contexts; it counts against pljs.memory_limit and is
+     * not returned until the backend exits.
+     */
     if (JS_IsNull(o) || JS_IsUndefined(o)) {
       (*is_null)[c] = true;
+      JS_FreeValue(ctx, o);
       continue;
     }
 
@@ -804,6 +833,8 @@ Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
     // considered `NULL`.
     values[c] = pljs_jsvalue_to_datum(TupleDescAttr(tupdesc, c)->atttypid, o,
                                       &(*is_null)[c], ctx, NULL);
+
+    JS_FreeValue(ctx, o);
   }
 
   if (cleanup_tupdesc) {
@@ -854,13 +885,17 @@ Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
 
     JSValue o = JS_GetPropertyStr(ctx, val, colname);
 
+    /* Owned reference: release it on both paths.  See pljs_jsvalue_to_datums(). */
     if (JS_IsNull(o) || JS_IsUndefined(o)) {
       nulls[c] = true;
+      JS_FreeValue(ctx, o);
       continue;
     }
 
     values[c] = pljs_jsvalue_to_datum(TupleDescAttr(tupdesc, c)->atttypid, o,
                                       &nulls[c], ctx, NULL);
+
+    JS_FreeValue(ctx, o);
   }
 
   // Form a Tuple from the values and nulls using the tuple descriptor
@@ -1803,6 +1838,19 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
     // Free up the memory.
     JS_FreeValue(ctx, o);
   }
+
+  /*
+   * Release the property-name table and its atom references handed back by
+   * JS_GetOwnPropertyNames().  The key C-strings are freed by jsonb_from_value()
+   * (WJB_KEY), but the table itself is js_malloc'd and each tab[i].atom is an
+   * owned reference; leaking them grows the QuickJS runtime heap on every
+   * JS-object -> jsonb conversion (a very hot path for functions returning
+   * jsonb), eventually tripping pljs.memory_limit in a long-running backend.
+   */
+  for (uint32_t object_key = 0; object_key < object_keys_length; object_key++) {
+    JS_FreeAtom(ctx, tab[object_key].atom);
+  }
+  js_free(ctx, tab);
 
   // Push that we are at the end of an object.
   value = jsonb_push(pstate, WJB_END_OBJECT, NULL);
