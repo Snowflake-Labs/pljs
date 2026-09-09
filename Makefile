@@ -44,7 +44,7 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	currentresource \
 	pg_typedarray_views \
 	pg_find_function_no_perm pg_cursor_error_recovery pg_prepared_plan_gc \
-	pg_memory_limit_set \
+	pg_cancellation pg_stack_depth pg_memory_limit_set \
 	pg_param_plan_leak \
 	pg_object_keys_leak \
 	pg_errordata_stack \
@@ -57,6 +57,7 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_error_envelope_fields \
 	pg_find_function_refcount \
 	pg_trigger_spi \
+	pg_nested_stack_anchor \
 	pg_composite_null_datum \
 	pg_error_sqlstate \
 	pg_plan_argcount_sqlstate

@@ -8,6 +8,7 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "nodes/parsenodes.h"
+#include "tcop/tcopprot.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -37,7 +38,6 @@ static Datum call_srf_function(PG_FUNCTION_ARGS, pljs_context *context,
 
 static void call_anonymous_function(const char *, JSContext *);
 static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context);
-static void signal_handler(int sig_num);
 static int interrupt_handler(JSRuntime *rt, void *opaque);
 static void setup_storage_for_context(pljs_context *context,
                                       FunctionCallInfo fcinfo);
@@ -62,8 +62,6 @@ JSClassID js_pljs_storage_id;
 // class id for pljs window object
 JSClassID js_window_id;
 
-static uint64_t os_pending_signals = 0;
-
 /**
  * @brief PostgreSQL extension initialization function.
  *
@@ -71,9 +69,12 @@ static uint64_t os_pending_signals = 0;
  * runtime.
  */
 void _PG_init(void) {
-  signal(SIGINT, signal_handler);
-  signal(SIGTERM, signal_handler);
-  signal(SIGABRT, signal_handler);
+  // NB: do NOT install our own signal() handlers here.  This runs inside a
+  // backend that has already set up PostgreSQL's own SIGINT/SIGTERM handlers
+  // (query cancel, fast shutdown); overwriting them process-wide broke
+  // statement_timeout / pg_cancel_backend / pg_terminate_backend for the whole
+  // backend for the rest of its life.  Instead, interrupt_handler() consults
+  // PostgreSQL's interrupt flags directly (see below).
 
   // Initialize cache.
   pljs_cache_init();
@@ -83,6 +84,40 @@ void _PG_init(void) {
 
   // Set up the quickjs runtime.
   rt = JS_NewRuntime();
+
+  /*
+   * Bound the JS call-stack budget explicitly instead of trusting the vendored
+   * JS_DEFAULT_STACK_SIZE.  Without an active limit, unbounded/deep JS
+   * recursion runs the backend's C stack into the ground and crashes the whole
+   * process (SIGSEGV) rather than raising a catchable "stack overflow".  We
+   * size the JS budget to half of the DBA's max_stack_depth so pure-JS
+   * recursion trips QuickJS's guard well before PostgreSQL's own C-stack limit
+   * (and long before the kernel stack limit) is reached, with a floor so a
+   * small max_stack_depth still leaves JS usable.  PostgreSQL's own
+   * check_stack_depth() bounds any cumulative C stack consumed across nested
+   * JS<->SQL re-entries.
+   *
+   * The budget set here is a size, not an anchor: JS_NewRuntime() records the
+   * stack top at this point in _PG_init, which is not where any real JS call
+   * begins.  Each entry into JS therefore calls JS_UpdateStackTop() to
+   * re-anchor the measurement at its own depth -- see the call sites around
+   * each JS_Call().
+   *
+   * Note an asymmetry with pljs.memory_limit below, which does install an
+   * assign hook: max_stack_depth is read once, here, so a later SET
+   * max_stack_depth does not change the JS budget for the life of the backend.
+   * It is a core GUC with no hook available to us, and re-reading it per call
+   * would let one session's SET silently resize a runtime shared with every
+   * other function in the backend.
+   */
+  {
+    long depth_bytes = (long)max_stack_depth * 1024L;
+    size_t js_stack_size = (size_t)(depth_bytes / 2);
+    if (js_stack_size < 256 * 1024) {
+      js_stack_size = 256 * 1024;
+    }
+    JS_SetMaxStackSize(rt, js_stack_size);
+  }
 
   // Register runtime JS classes (must happen before any JSContext is created,
   // so every context sees the class; e.g. the prepared-statement handle whose
@@ -293,13 +328,33 @@ pg_noreturn static void pljs_ereport_js_error(const char *message,
   pg_unreachable();
 }
 
-
-static void signal_handler(int sig_num) {
-  os_pending_signals |= ((uint64_t)1 << sig_num);
-}
-
 static int interrupt_handler(JSRuntime *rt, void *opaque) {
-  return (os_pending_signals >> SIGINT) & 1;
+  /*
+   * Return non-zero to make QuickJS abort the running script.  We interrupt on
+   * a pending query cancel (statement_timeout, pg_cancel_backend) or backend
+   * termination (pg_terminate_backend, fast shutdown), read straight from
+   * PostgreSQL's own interrupt flags.
+   *
+   * We deliberately do NOT call CHECK_FOR_INTERRUPTS() here: that would
+   * ereport(ERROR) / siglongjmp out of the middle of the QuickJS interpreter
+   * and leave the runtime in an inconsistent state.  Instead we let QuickJS
+   * unwind cleanly to a JS exception, and each caller runs
+   * CHECK_FOR_INTERRUPTS() once control is back in C to raise the real error
+   * (see the JS_IsException paths below).
+   */
+  /*
+   * QueryCancelPending and ProcDiePending are the two that matter most, and are
+   * kept as an explicit fast path.  InterruptPending then catches everything else
+   * PostgreSQL considers worth interrupting for -- ClientConnectionLost, recovery
+   * conflicts, IdleInTransactionSessionTimeoutPending -- so a runaway script
+   * unwinds for those too rather than spinning until one of the first two happens
+   * to be set.
+   *
+   * A spurious wake-up is harmless: the caller runs CHECK_FOR_INTERRUPTS() once
+   * control is back in C, and if nothing is actually pending that is a no-op and
+   * the JavaScript exception is reported normally.
+   */
+  return (QueryCancelPending || ProcDiePending || InterruptPending) ? 1 : 0;
 }
 
 /**
@@ -1104,16 +1159,43 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
   // generate the function as javascript with all of its arguments
   appendStringInfo(&src, "(function () {%s})();", source);
 
+  /*
+   * Re-anchor QuickJS's stack measurement here, at the C-stack depth this call
+   * actually starts from.  JS_NewRuntime() records the stack top once, inside
+   * _PG_init, at whatever depth the first pljs call happened to be -- but JS
+   * can run far deeper than that (SQL -> JS -> pljs.execute -> SQL -> JS ->
+   * ...), so a budget measured from the original anchor does not describe the
+   * stack this call has left.  The vendored QuickJS exports JS_UpdateStackTop()
+   * for exactly this.
+   */
+  JS_UpdateStackTop(JS_GetRuntime(ctx));
   JS_SetInterruptHandler(JS_GetRuntime(ctx), interrupt_handler, NULL);
-  os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>", 0);
 
   if (!JS_IsException(val)) {
     pfree(src.data);
   } else {
+    /*
+     * Extract the error, release everything, then report.  The report never
+     * returns, so anything freed after it is dead code -- and `val` was never
+     * released on this path at all, leaking a QuickJS reference for every failed
+     * DO block.
+     */
     char *message = NULL, *pg_detail = NULL;
     char *detail = dump_error(ctx, &message, &pg_detail);
+
+    JS_FreeValue(ctx, val);
+    pfree(src.data);
+
+    /*
+     * If QuickJS aborted because a cancel/terminate is pending, raise the real
+     * PostgreSQL error (canceling statement / terminating connection) now that
+     * we are safely back in C, instead of the generic JS interrupt message.
+     * After the cleanup above, so a cancel cannot skip it.
+     */
+    CHECK_FOR_INTERRUPTS();
+
     pljs_ereport_js_error(message, pg_detail, detail, "execution error");
   }
 }
@@ -1235,8 +1317,17 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
     elog(ERROR, "could not connect to spi manager");
   }
 
+  /*
+   * Re-anchor QuickJS's stack measurement here, at the C-stack depth this call
+   * actually starts from.  JS_NewRuntime() records the stack top once, inside
+   * _PG_init, at whatever depth the first pljs call happened to be -- but JS
+   * can run far deeper than that (SQL -> JS -> pljs.execute -> SQL -> JS ->
+   * ...), so a budget measured from the original anchor does not describe the
+   * stack this call has left.  The vendored QuickJS exports JS_UpdateStackTop()
+   * for exactly this.
+   */
+  JS_UpdateStackTop(JS_GetRuntime(context->ctx));
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
-  os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue ret =
       JS_Call(context->ctx, context->js_function, JS_UNDEFINED, 10, argv);
@@ -1248,14 +1339,22 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   SPI_finish();
 
   if (JS_IsException(ret)) {
+    /*
+     * Same order as call_function(): extract, release, then report.  The
+     * JS_FreeValue() below used to sit *after* the report, which never returns,
+     * so it was dead code -- `ret` leaked a QuickJS reference on every trigger
+     * exception, not merely on a cancel.
+     */
     char *message = NULL, *pg_detail = NULL;
     char *detail = dump_error(context->ctx, &message, &pg_detail);
-    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
 
     JS_FreeValue(context->ctx, ret);
-
     MemoryContextSwitchTo(old_context);
-    PG_RETURN_VOID();
+
+    /* Surface a pending cancel/terminate as the real PostgreSQL error. */
+    CHECK_FOR_INTERRUPTS();
+
+    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
   }
 
   if (JS_IsNull(ret) || !TRIGGER_FIRED_FOR_ROW(event)) {
@@ -1317,8 +1416,17 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
     elog(ERROR, "could not connect to spi manager");
   }
 
+  /*
+   * Re-anchor QuickJS's stack measurement here, at the C-stack depth this call
+   * actually starts from.  JS_NewRuntime() records the stack top once, inside
+   * _PG_init, at whatever depth the first pljs call happened to be -- but JS
+   * can run far deeper than that (SQL -> JS -> pljs.execute -> SQL -> JS ->
+   * ...), so a budget measured from the original anchor does not describe the
+   * stack this call has left.  The vendored QuickJS exports JS_UpdateStackTop()
+   * for exactly this.
+   */
+  JS_UpdateStackTop(JS_GetRuntime(context->ctx));
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
-  os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
                         context->function->inargs, argv);
@@ -1330,6 +1438,12 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
     char *error_message = dump_error(context->ctx, &message, &pg_detail);
 
     JS_FreeValue(context->ctx, ret);
+
+    /*
+     * If the exception is really a pending cancel or terminate, raise the proper
+     * PostgreSQL error rather than reporting it as a JavaScript failure.
+     */
+    CHECK_FOR_INTERRUPTS();
 
     pljs_ereport_js_error(message, pg_detail, error_message, "execution error");
 
@@ -1458,8 +1572,17 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
   // Set the current return context.
   storage->return_state = state;
 
+  /*
+   * Re-anchor QuickJS's stack measurement here, at the C-stack depth this call
+   * actually starts from.  JS_NewRuntime() records the stack top once, inside
+   * _PG_init, at whatever depth the first pljs call happened to be -- but JS
+   * can run far deeper than that (SQL -> JS -> pljs.execute -> SQL -> JS ->
+   * ...), so a budget measured from the original anchor does not describe the
+   * stack this call has left.  The vendored QuickJS exports JS_UpdateStackTop()
+   * for exactly this.
+   */
+  JS_UpdateStackTop(JS_GetRuntime(context->ctx));
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
-  os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
                         context->function->inargs, argv);
@@ -1467,6 +1590,9 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
   SPI_finish();
 
   if (JS_IsException(ret)) {
+    // Surface a pending cancel/terminate as the real PostgreSQL error.
+    CHECK_FOR_INTERRUPTS();
+
     char *message = NULL, *pg_detail = NULL;
     char *error_message = dump_error(context->ctx, &message, &pg_detail);
 
