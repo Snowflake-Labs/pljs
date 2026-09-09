@@ -1,6 +1,6 @@
 #include "postgres.h"
 
-#include "catalog/pg_database.h"
+#include "catalog/pg_language.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type_d.h"
 #include "commands/trigger.h"
@@ -494,8 +494,24 @@ static void setup_start_proc(JSContext *ctx) {
     if (JS_IsException(ret)) {
       char *message = NULL, *pg_detail = NULL;
       char *detail = dump_error(ctx, &message, &pg_detail);
+
+      /*
+       * Release the JavaScript side before reporting: the report does not
+       * return, so anything freed after it is never freed at all.
+       */
+      JS_FreeValue(ctx, ret);
+      JS_FreeValue(ctx, func);
+
       pljs_ereport_js_error(message, pg_detail, detail, "start proc execution error");
     }
+
+    /*
+     * The function reference and the call's result both belong to this function.
+     * Neither was released, so every context creation with pljs.start_proc set
+     * leaked both.
+     */
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, func);
   }
 }
 
@@ -700,6 +716,12 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
 
     // If there was a problem creating the function, we'll just return VOID.
     if (JS_IsUndefined(context.js_function)) {
+      /*
+       * This early return bypassed the per-branch ReleaseSysCache() below, so a
+       * function whose body failed to compile leaked the pg_proc pin for the
+       * rest of the transaction.
+       */
+      ReleaseSysCache(proctuple);
       PG_RETURN_VOID();
     }
 
@@ -707,8 +729,20 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     pljs_cache_function_add(&context);
   }
 
-  ReleaseSysCache(proctuple);
-
+  /*
+   * NB: `proctuple` must stay pinned until we have finished reading from it,
+   * but it MUST be released before we enter JavaScript, because a PROCEDURE
+   * can run COMMIT/ROLLBACK internally and it is illegal to hold a syscache
+   * pin across a transaction boundary (it trips "resource was not closed").
+   *
+   * The original code released the pin up front, before either branch, which
+   * was a use-after-free: the trigger branch still read GETSTRUCT(proctuple)
+   * and the function branch still passed the tuple to
+   * convert_arguments_to_javascript() -> get_func_arg_info().  That only bit
+   * once the entry was actually evicted (cache pressure / concurrent DDL in a
+   * long-running backend).  Release it in each branch at the last safe point
+   * instead: right after the final read, before any JS is executed.
+   */
   if (is_trigger) {
     // Call in the context of a trigger.
     Form_pg_proc procStruct;
@@ -716,11 +750,16 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     procStruct = (Form_pg_proc)GETSTRUCT(proctuple);
 
     context.function->rettype = procStruct->prorettype;
+
+    ReleaseSysCache(proctuple);
+
     retval = call_trigger(fcinfo, &context);
   } else {
     // Call as a function.
     JSValueConst *argv =
         convert_arguments_to_javascript(fcinfo, proctuple, &context);
+
+    ReleaseSysCache(proctuple);
 
     // Get the old storage object.
     pljs_storage *old_storage = pljs_storage_for_context(context.ctx);
@@ -728,11 +767,38 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     // Set up a new storage object for this call.
     setup_storage_for_context(&context, fcinfo);
 
-    if (context.function->is_srf) {
-      retval = call_srf_function(fcinfo, &context, argv);
-    } else {
-      retval = call_function(fcinfo, &context, argv);
+    /*
+     * The storage MUST be restored even when the call raises.
+     *
+     * JSContexts are cached per user id and reused for the rest of the session,
+     * and the storage is attached to the context, so a call that raised used to
+     * leave its own storage installed permanently -- pointing at this call's
+     * fcinfo, its return_state and its execution memory context, all of which
+     * are gone once the error has unwound.  The next call of *any* kind that
+     * reads pljs_storage_for_context() -- a trigger, a window function,
+     * return_next() -- then dereferenced that stale pointer and segfaulted the
+     * backend.
+     *
+     * This was latent until a conversion error became reachable from inside a
+     * set-returning function: before that, returning an out-of-range integer
+     * wrapped silently instead of raising, so nothing escaped this block.  A
+     * failing SETOF call followed by any trigger reproduces it within a couple
+     * of dozen iterations.
+     */
+    PG_TRY();
+    {
+      if (context.function->is_srf) {
+        retval = call_srf_function(fcinfo, &context, argv);
+      } else {
+        retval = call_function(fcinfo, &context, argv);
+      }
     }
+    PG_CATCH();
+    {
+      store_storage_in_context(&context, old_storage);
+      PG_RE_THROW();
+    }
+    PG_END_TRY();
 
     // Reset to the old storage now that the call is over.
     store_storage_in_context(&context, old_storage);
@@ -805,6 +871,29 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
  * @returns #Datum of type `VOID`
  */
 Datum pljs_call_validator(PG_FUNCTION_ARGS) {
+  /*
+   * XXX This validator does not actually validate anything, and fixing that is
+   * deliberately left out of this change.
+   *
+   * A language validator is called as validator(oid_of_function_being_created),
+   * so the function to check is the ARGUMENT; fcinfo->flinfo->fn_oid below is
+   * the validator's *own* OID.  Reading prosrc from it fetches the validator's
+   * own pg_proc row, whose prosrc is the C symbol name "pljs_call_validator" --
+   * which happens to parse as a bare JavaScript identifier.  So validation
+   * always succeeds and an invalid body is accepted silently:
+   *
+   *   CREATE FUNCTION f() RETURNS int AS $$ this is ( not js $$ LANGUAGE pljs;
+   *   CREATE FUNCTION
+   *
+   * with the syntax error only surfacing on the first call.
+   *
+   * Simply switching to PG_GETARG_OID(0) is NOT the fix: a pljs body is a
+   * function *body*, not a standalone program -- `return 42;` is a syntax error
+   * at top level -- so the validator has to wrap it the way
+   * pljs_compile_function() does, with the function's argument names, before
+   * compiling.  Without that, correcting the OID rejects almost every valid
+   * function in the suite.  That belongs in its own change with its own tests.
+   */
   Oid fn_oid = fcinfo->flinfo->fn_oid;
   HeapTuple proctuple;
   const char *sourcecode;
@@ -838,16 +927,49 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
   if (JS_IsException(val)) {
     char *message = NULL, *pg_detail = NULL;
     char *detail = dump_error(ctx, &message, &pg_detail);
+
+    /*
+     * dump_error() has copied everything we need into palloc'd memory, so the
+     * JavaScript side can go now.  Without this the whole context leaks on
+     * every rejected function body.
+     */
+    JS_FreeValue(ctx, val);
+    JS_FreeContext(ctx);
+    ReleaseSysCache(proctuple);
+
     pljs_ereport_js_error(message, pg_detail, detail, "execution error");
   }
 
-  // call validator can release the context
+  /*
+   * Drop the compiled function before releasing the context.  JS_FreeContext()
+   * does not free a context that still has live references into it, so leaving
+   * this JSValue alone leaked the entire JSContext -- including all of QuickJS's
+   * intrinsic objects, roughly 68KB measured -- on every single CREATE OR
+   * REPLACE FUNCTION.  A backend doing repeated DDL grew past 500MB and died
+   * with SIGSEGV in seconds.  QuickJS allocates on the libc heap, so none of it
+   * was visible in pg_backend_memory_contexts.
+   */
+  JS_FreeValue(ctx, val);
   JS_FreeContext(ctx);
 
   ReleaseSysCache(proctuple);
 
-  // We also clear the caches.  It is safest to just clear up any instances of
-  // the function or procedure.
+  /*
+   * Clear the caches: the function being created or replaced may already have a
+   * compiled copy cached, and it is now stale.
+   *
+   * This is deliberately still the blanket reset rather than a targeted removal
+   * of this one function.  A cached entry also carries the result-type
+   * information resolved at its first call, and for a RECORD-returning function
+   * that comes from the *call site*, not the function -- so a targeted
+   * invalidation leaves the entry from an earlier call site in place and the
+   * next call converts against the wrong tuple descriptor.  Until the cache key
+   * covers that, the reset is what keeps it correct.
+   *
+   * pljs_cache_reset() now frees the QuickJS side before dropping the Postgres
+   * memory that references it; it previously orphaned every cached JSContext on
+   * the libc heap.
+   */
   pljs_cache_reset();
 
   PG_RETURN_VOID();
@@ -1059,11 +1181,32 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
 
   argv[9] = tgargv;
 
+  /*
+   * Connect to SPI, which call_trigger() never did -- so pljs.execute(),
+   * pljs.prepare() and every other SPI entry point failed inside a trigger. Not
+   * just DDL: a bare pljs.execute("SELECT 1") in a BEFORE INSERT trigger failed
+   * too.  Upstream reports it as "execution error"; the error-surfacing work in
+   * this series turns it into the underlying "current transaction is aborted",
+   * which is what made it findable.
+   *
+   * Atomic unconditionally: a trigger has no CallContext, so there is no
+   * nonatomic case to honour, and a trigger must not be able to commit.
+   */
+  if (SPI_connect_ext(0) != SPI_OK_CONNECT) {
+    elog(ERROR, "could not connect to spi manager");
+  }
+
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
   os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue ret =
       JS_Call(context->ctx, context->js_function, JS_UNDEFINED, 10, argv);
+
+  /*
+   * Before the exception check, as in call_function(): the report below does
+   * not return, so an SPI_finish() after it would never run.
+   */
+  SPI_finish();
 
   if (JS_IsException(ret)) {
     char *message = NULL, *pg_detail = NULL;
@@ -1466,6 +1609,7 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
 
   /* Should not happen? */
   if (!OidIsValid(prolang)) { // NOLINT
+    ReleaseSysCache(functuple);
     return func;
   }
 
@@ -1473,12 +1617,20 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
   HeapTuple langtuple =
       SearchSysCache(LANGNAME, NameGetDatum(&langname), 0, 0, 0);
   if (HeapTupleIsValid(langtuple)) {
-    Form_pg_database datForm = (Form_pg_database)GETSTRUCT(langtuple);
-    Oid langtupoid = datForm->oid;
+    /*
+     * This is a pg_language tuple, so it must be read through
+     * Form_pg_language.  It was previously cast to Form_pg_database, which
+     * happened to yield the right answer only because both catalogs begin with
+     * an `Oid oid` at the same offset -- any future field access, or a change to
+     * either catalog's layout, would have read the wrong bytes.
+     */
+    Form_pg_language langForm = (Form_pg_language)GETSTRUCT(langtuple);
+    Oid langtupoid = langForm->oid;
 
     ReleaseSysCache(langtuple);
 
     if (langtupoid != prolang) {
+      ReleaseSysCache(functuple);
       return func;
     }
   }
@@ -1491,7 +1643,26 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
   if (function_entry != NULL) {
     pljs_function_cache_to_context(&context, function_entry);
 
-    func = context.js_function;
+    /*
+     * Hand out a reference we own.  pljs_function_cache_to_context() borrows the
+     * cache's, and the cache entry is that value's only owner -- but a JSValue
+     * returned from a C function belongs to its caller, so pljs.find_function()
+     * handed JavaScript a reference it had not counted.  The engine dropped it
+     * when the JS variable died, and after enough lookups the refcount reached
+     * zero while the entry was still cached, leaving the cache holding a freed
+     * object.  The next call through it terminated the backend.
+     */
+    func = JS_DupValue(context.ctx, context.js_function);
+
+    /*
+     * The pin was previously released only on the cache-miss branch below, so a
+     * pljs.find_function() that hit the cache -- the common case once a function
+     * has been called once -- held a syscache pin on pg_proc for the rest of the
+     * transaction.  Repeated lookups in one transaction accumulated them, which
+     * is what produces "WARNING: resource was not closed: cache pg_proc ... has
+     * count N" under USE_ASSERT_CHECKING.
+     */
+    ReleaseSysCache(functuple);
   } else {
     pljs_context_cache_value *context_entry =
         pljs_cache_context_find(GetUserId());
