@@ -55,12 +55,15 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_record_no_column_list \
 	pg_return_next_error_frames \
 	pg_error_envelope_fields \
+	pg_validator \
+	pg_cross_backend_invalidation \
 	pg_find_function_refcount \
 	pg_trigger_spi \
 	pg_nested_stack_anchor \
 	pg_composite_null_datum \
 	pg_error_sqlstate \
-	pg_plan_argcount_sqlstate
+	pg_plan_argcount_sqlstate \
+	pg_targeted_invalidation
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 
