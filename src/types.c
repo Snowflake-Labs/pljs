@@ -75,6 +75,27 @@ inline static bool Is_Date(JSValueConst obj) {
   return NULL != JS_GetOpaque(obj, JS_CLASS_DATE);
 }
 
+/*
+ * Release a property-name enumeration obtained from JS_GetOwnPropertyNames().
+ *
+ * QuickJS hands the caller both the array and a reference on every atom in it,
+ * and expects both back; its own js_free_prop_enum() is static, so this is the
+ * public-API equivalent.  Without it every enumerated object leaked its keys
+ * for the life of the backend.
+ */
+static void pljs_free_prop_enum(JSContext *ctx, JSPropertyEnum *tab,
+                                uint32_t len) {
+  if (tab == NULL) {
+    return;
+  }
+
+  for (uint32_t i = 0; i < len; i++) {
+    JS_FreeAtom(ctx, tab[i].atom);
+  }
+
+  js_free(ctx, tab);
+}
+
 /**
  * @brief Whether a value is a plain JavaScript object -- `{...}` -- as opposed
  * to an Array, Date, ArrayBuffer, typed array or any other branded builtin.
@@ -162,6 +183,57 @@ static double pljs_convert_timestamptz_to_epoch(TimestampTz tm) {
 #endif
 
   return epoch + (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * 86400000.0;
+}
+
+/*
+ * Free a detoasted copy, if detoasting made one.
+ *
+ * PG_DETOAST_DATUM() and its relatives return the original pointer when the
+ * value was already a plain, uncompressed varlena, and a fresh palloc'd copy
+ * otherwise -- when it was compressed, stored out of line, or carrying a
+ * 1-byte short header, which is what PostgreSQL uses for any small value in a
+ * tuple.  Nothing freed those copies, so converting a short-headered text,
+ * array or jsonb column to JavaScript leaked one per row, for the length of
+ * the enclosing function call.
+ */
+static void pljs_free_if_detoasted(void *detoasted, Datum original) {
+  if (detoasted != NULL && detoasted != DatumGetPointer(original)) {
+    pfree(detoasted);
+  }
+}
+
+/**
+ * @brief Converts a `NUMERIC` #Datum to a Javascript double.
+ *
+ * Does what `numeric_float8()` does -- render the value with `numeric_out()`
+ * and parse it back with `float8in()` -- rather than calling it, for two
+ * reasons.  As of PostgreSQL 19 `numeric_float8()` frees the string it renders
+ * only on its error path, so every successful conversion leaked one.  And it
+ * reaches its argument through `PG_GETARG_NUMERIC()`, which detoasts without
+ * freeing: a `NUMERIC` column carries a 1-byte short header in a tuple, so
+ * that leaked a copy per row on every server version.  Detoasting here instead
+ * puts both allocations somewhere we can release them.
+ *
+ * A number inside a `JSONB` value needs no copy -- it is stored int-aligned
+ * with a full header -- so detoasting returns it unchanged and frees nothing.
+ *
+ * Special values survive the round trip: `numeric_out()` writes `NaN`,
+ * `Infinity` and `-Infinity`, all of which `float8in()` accepts.
+ *
+ * @param arg #Datum of type `Numeric`
+ * @returns @c double value of the numeric
+ */
+static double pljs_numeric_to_double(Datum arg) {
+  Numeric numeric = DatumGetNumeric(arg);
+  char *str = DatumGetCString(
+      DirectFunctionCall1(numeric_out, NumericGetDatum(numeric)));
+  double value =
+      DatumGetFloat8(DirectFunctionCall1(float8in, CStringGetDatum(str)));
+
+  pfree(str);
+  pljs_free_if_detoasted(numeric, arg);
+
+  return value;
 }
 
 /**
@@ -388,7 +460,8 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
   Datum *values;
   bool *nulls;
   int nelems;
-  ArrayType *arr = DatumGetArrayTypeP(arg);
+
+  ArrayType *array_value = DatumGetArrayTypeP(arg);
 
   /*
    * pljs represents a SQL array as a flat JavaScript array. deconstruct_array()
@@ -396,7 +469,7 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
    * and discard the dimensionality -- {{1,2},{3,4}} becomes [1,2,3,4] -- so a
    * round trip silently changes the value. Say so instead of losing the shape.
    */
-  if (ARR_NDIM(arr) > 1) {
+  if (ARR_NDIM(array_value) > 1) {
     ereport(ERROR,
             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
              errmsg("cannot convert a multidimensional array to a JavaScript "
@@ -405,8 +478,8 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
                        "JavaScript arrays.")));
   }
 
-  deconstruct_array(arr, type->typid, type->length, type->byval, type->align,
-                    &values, &nulls, &nelems);
+  deconstruct_array(array_value, type->typid, type->length, type->byval,
+                    type->align, &values, &nulls, &nelems);
 
   for (int i = 0; i < nelems; i++) {
     JSValue value =
@@ -420,6 +493,13 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
 
   pfree(values);
   pfree(nulls);
+
+  /*
+   * Freed only here: for a by-reference element type, deconstruct_array()
+   * hands back pointers into the array rather than copies, so it has to stay
+   * alive until every element has been converted above.
+   */
+  pljs_free_if_detoasted(array_value, arg);
 
   return array;
 }
@@ -450,11 +530,25 @@ static JSValue pljs_datum_to_jsvalue_fallback(Datum arg, pljs_type type,
   } else {
     // If this is a variable length type, make a copy of it.
     if (type.length == -1) {
-      struct varlena *vl = (struct varlena *)DatumGetPointer(arg);
+      /*
+       * The datum may be compressed, stored out of line, or carry a 1-byte
+       * short header, so it has to be detoasted before it can be read.
+       * VARDATA() assumes a 4-byte header: pairing it with
+       * VARSIZE_ANY_EXHDR() skipped three bytes into a packed value's payload
+       * and read three bytes past its end.  VARDATA_ANY() is the accessor
+       * that matches VARSIZE_ANY_EXHDR().
+       */
+      struct varlena *vl = PG_DETOAST_DATUM_PACKED(arg);
 
-      ret = JS_NewStringLen(ctx, VARDATA(vl), VARSIZE_ANY_EXHDR(vl));
+      ret = JS_NewStringLen(ctx, VARDATA_ANY(vl), VARSIZE_ANY_EXHDR(vl));
       JS_SetPropertyStr(ctx, ret, "length",
                         JS_NewInt32(ctx, VARSIZE_ANY_EXHDR(vl)));
+
+      // Only free what detoasting allocated: an already-unpacked datum is
+      // returned as-is and belongs to the caller.
+      if (vl != (struct varlena *)DatumGetPointer(arg)) {
+        pfree(vl);
+      }
     } else {
       ret = JS_NewStringLen(ctx, (char *)arg, type.length);
       JS_SetPropertyStr(ctx, ret, "length", JS_NewInt32(ctx, type.length));
@@ -530,36 +624,43 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
     break;
 
   case NUMERICOID:
-    return_result = JS_NewFloat64(
-        ctx, DatumGetFloat8(DirectFunctionCall1(numeric_float8, arg)));
+    return_result = JS_NewFloat64(ctx, pljs_numeric_to_double(arg));
     break;
 
   case TEXTOID:
   case VARCHAROID:
   case BPCHAROID:
-  case XMLOID:
+  case XMLOID: {
     // Get a copy of the string.
-    str = pljs_util_dup_pgtext(DatumGetTextP(arg));
+    text *text_value = DatumGetTextP(arg);
+
+    str = pljs_util_dup_pgtext(text_value);
 
     return_result = JS_NewString(ctx, str);
 
     // Free the memory allocated.
     pfree(str);
+    pljs_free_if_detoasted(text_value, arg);
     break;
+  }
 
   case NAMEOID:
     return_result = JS_NewString(ctx, DatumGetName(arg)->data);
     break;
 
-  case JSONOID:
+  case JSONOID: {
     // Get a copy of the string.
-    str = pljs_util_dup_pgtext(DatumGetTextP(arg));
+    text *json_value = DatumGetTextP(arg);
+
+    str = pljs_util_dup_pgtext(json_value);
 
     return_result = JS_ParseJSON(ctx, str, strlen(str), NULL);
 
     // free the memory allocated.
     pfree(str);
+    pljs_free_if_detoasted(json_value, arg);
     break;
+  }
 
   case JSONBOID: {
 #if JSONB_DIRECT_CONVERSION
@@ -572,6 +673,8 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
     } else {
       return_result = convert_jsonb(&jsonb->root, ctx);
     }
+
+    pljs_free_if_detoasted(jsonb, arg);
 #else
     // Get the datum.
     Jsonb *jb = DatumGetJsonbP(arg);
@@ -584,6 +687,7 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
 
     // Free the memory allocated.
     pfree(str);
+    pljs_free_if_detoasted(jb, arg);
 #endif
     break;
   }
@@ -596,6 +700,9 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
 
     return_result = JS_NewStringLen(ctx, buf, VARSIZE_ANY_EXHDR(p));
     pfree(buf);
+
+    // PG_DETOAST_DATUM_COPY always allocates, so this is never the original.
+    pfree(p);
     break;
   }
 
@@ -710,8 +817,6 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
     return false;
   }
 
-  bool result = true;
-
   for (int16 c = 0; c < tupdesc->natts; c++) {
     if (TupleDescAttr(tupdesc, c)->attisdropped) {
       continue;
@@ -788,27 +893,15 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
         *provided_keys = keys.data;
       }
 
-      return false;
+      pljs_free_prop_enum(ctx, tab, object_keys_length);
 
-      result = false;
-      break;
+      return false;
     }
   }
 
-  /*
-   * JS_GetOwnPropertyNames() returns a js_malloc'd table plus one owned atom
-   * reference per entry; both must be released.  Otherwise every call -- e.g.
-   * every RETURNS TABLE / SETOF composite return_next() -- leaks the table
-   * (which counts against the QuickJS runtime memory limit) and an atom
-   * reference per property, and neither is reclaimed until the backend exits.
-   * A long-running backend therefore slowly exhausts pljs.memory_limit.
-   */
-  for (uint32_t i = 0; i < object_keys_length; i++) {
-    JS_FreeAtom(ctx, tab[i].atom);
-  }
-  js_free(ctx, tab);
+  pljs_free_prop_enum(ctx, tab, object_keys_length);
 
-  return result;
+  return true;
 }
 
 /**
@@ -929,7 +1022,8 @@ Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
 
     JSValue o = JS_GetPropertyStr(ctx, val, colname);
 
-    /* Owned reference: release it on both paths.  See pljs_jsvalue_to_datums(). */
+    /* Owned reference: release it on both paths.  See pljs_jsvalue_to_datums().
+     */
     if (JS_IsNull(o) || JS_IsUndefined(o)) {
       nulls[c] = true;
       JS_FreeValue(ctx, o);
@@ -1047,13 +1141,18 @@ static inline Datum pljs_null_datum(bool *is_null, FunctionCallInfo fcinfo) {
 }
 
 /**
- * @brief Parse a JavaScript string with a PostgreSQL type's input function.
+ * @brief Converts a JavaScript string into a #Datum through the target type's
+ * text input function.
  *
- * QuickJS's numeric/boolean coercions do not parse SQL text: JS_ToBool()
- * treats every non-empty string as true, and the numeric conversions go
- * through an IEEE-754 double. The input function reads the text exactly
- * as a SQL literal of that type would, and raises on anything it cannot
- * accept. That is also what plv8 does.
+ * The input function parses the full decimal text exactly, and raises on
+ * malformed or out-of-range input.  That is the only correct way to turn a
+ * *string* into a numeric datum: QuickJS's numeric coercion
+ * (JS_ToInt32/JS_ToInt64/JS_ToFloat64) goes through an IEEE-754 double, which
+ * silently loses precision above 2^53 -- "9223372036854775807" arrives as
+ * INT64_MIN, and "123456789012345678" lands two off.
+ *
+ * It is also what plv8 does, so a procedure that binds a numeric string behaves
+ * the same on both.
  *
  * @param typid #Oid - target type
  * @param val #JSValue - the JavaScript string to parse
@@ -1102,14 +1201,14 @@ static Datum pljs_string_to_datum_via_input(Oid typid, JSValueConst val,
  * @brief Raises the standard out-of-range error for an integer target type.
  */
 static void pljs_int_out_of_range(Oid typid) {
-  ereport(ERROR, (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-                  errmsg("value is out of range for type %s",
-                         format_type_be(typid))));
+  ereport(ERROR,
+          (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+           errmsg("value is out of range for type %s", format_type_be(typid))));
 }
 
 /**
- * @brief Converts a JavaScript number to an integer, rejecting values the target
- * type cannot represent.
+ * @brief Converts a JavaScript number to an integer, rejecting values the
+ * target type cannot represent.
  *
  * QuickJS's JS_ToInt32/JS_ToInt64 wrap modulo the word size, so 2147483648
  * silently became -2147483648, 40000 became -25536 for a smallint, and NaN and
@@ -1135,9 +1234,9 @@ static int64 pljs_number_to_int_checked(JSContext *ctx, JSValueConst val,
   }
 
   if (isnan(d)) {
-    ereport(ERROR, (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-                    errmsg("cannot convert NaN to type %s",
-                           format_type_be(typid))));
+    ereport(ERROR,
+            (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+             errmsg("cannot convert NaN to type %s", format_type_be(typid))));
   }
 
   if (isinf(d)) {
@@ -1235,19 +1334,18 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
    * json/jsonb.
    *
    * This dispatched into the array conversion anyway, because the condition
-   * above used to read "not json/jsonb", which is true of every scalar. It built
-   * an array Datum and returned it as the scalar. For a *nested* array that is
-   * silent corruption rather than an error: the element loop converts each
-   * element to the element type, so `return [[1,2],[3,4]]` for int[] yielded
-   * {357119344,357119392} -- the ArrayType pointers of the two inner arrays,
-   * reinterpreted as int4.
+   * above used to read "not json/jsonb", which is true of every scalar. It
+   * built an array Datum and returned it as the scalar. For a *nested* array
+   * that is silent corruption rather than an error: the element loop converts
+   * each element to the element type, so `return [[1,2],[3,4]]` for int[]
+   * yielded {357119344,357119392} -- the ArrayType pointers of the two inner
+   * arrays, reinterpreted as int4.
    *
    * The other direction already refuses a multidimensional array with a clear
    * message. This makes the output direction agree, rather than producing
    * numbers that look like data.
    */
-  if (JS_IsArray(ctx, val) && type.typid != JSONOID &&
-      type.typid != JSONBOID) {
+  if (JS_IsArray(ctx, val) && type.typid != JSONOID && type.typid != JSONBOID) {
     ereport(ERROR,
             (errcode(ERRCODE_DATATYPE_MISMATCH),
              errmsg("cannot convert a JavaScript array to %s",
@@ -1421,12 +1519,12 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
   case NAMEOID: {
     /*
      * `name` is a fixed-length NameData -- NAMEDATALEN bytes, no varlena header
-     * -- so it cannot be built the way text/varchar/bpchar are below. Doing that
-     * writes a varlena length word into the first bytes of the name, and every
-     * comparison against a real name then reads that as characters: a catalog
-     * lookup by nspname, relname or typname matches nothing at all, silently.
-     * namein() lays the value out correctly and applies the truncation rule for
-     * anything longer than NAMEDATALEN - 1.
+     * -- so it cannot be built the way text/varchar/bpchar are below. Doing
+     * that writes a varlena length word into the first bytes of the name, and
+     * every comparison against a real name then reads that as characters: a
+     * catalog lookup by nspname, relname or typname matches nothing at all,
+     * silently. namein() lays the value out correctly and applies the
+     * truncation rule for anything longer than NAMEDATALEN - 1.
      */
     const char *str = JS_ToCString(ctx, val);
     Datum ret;
@@ -1660,8 +1758,8 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
       /*
        * An invalid Date -- one whose getTime() is NaN -- has no epoch to
        * convert. It is not an exotic thing to hold: reading
-       * 'infinity'::timestamptz back into JavaScript produces exactly that, so a
-       * read-modify-write of a row with an infinite timestamp reaches here.
+       * 'infinity'::timestamptz back into JavaScript produces exactly that, so
+       * a read-modify-write of a row with an infinite timestamp reaches here.
        *
        * The arithmetic below turns NaN into a finite number, and the value
        * stored was 2000-01-01 -- the PostgreSQL epoch, i.e. an offset of zero.
@@ -1830,9 +1928,8 @@ static JSValue get_jsonb_value(JsonbValue *scalar_value, JSContext *ctx) {
                            scalar_value->val.string.len);
   } else if (scalar_value->type == jbvNumeric) {
     // `Number`.
-    return JS_NewFloat64(
-        ctx, DatumGetFloat8(DirectFunctionCall1(
-                 numeric_float8, PointerGetDatum(scalar_value->val.numeric))));
+    return JS_NewFloat64(ctx, pljs_numeric_to_double(
+                                  PointerGetDatum(scalar_value->val.numeric)));
   } else if (scalar_value->type == jbvBool) {
     // `Bool`.
     return JS_NewBool(ctx, scalar_value->val.boolean);
@@ -2120,9 +2217,8 @@ static JsonbValue *jsonb_from_value(JSValue value, JsonbBuildState *pstate,
  * @param ctx #JSContext - Javascript context to execute in
  * @returns #JsonbValue of the `JSONB` array
  */
-static JsonbValue *jsonb_array_from_array(JSValue array,
-                                          JsonbBuildState *pstate,
-                                          JSContext *ctx) {
+static JsonbValue *
+jsonb_array_from_array(JSValue array, JsonbBuildState *pstate, JSContext *ctx) {
   // Push the beginning of the array into the parse state.
   JsonbValue *value = jsonb_push(pstate, WJB_BEGIN_ARRAY, NULL);
 
@@ -2200,18 +2296,7 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
     JS_FreeValue(ctx, o);
   }
 
-  /*
-   * Release the property-name table and its atom references handed back by
-   * JS_GetOwnPropertyNames().  The key C-strings are freed by jsonb_from_value()
-   * (WJB_KEY), but the table itself is js_malloc'd and each tab[i].atom is an
-   * owned reference; leaking them grows the QuickJS runtime heap on every
-   * JS-object -> jsonb conversion (a very hot path for functions returning
-   * jsonb), eventually tripping pljs.memory_limit in a long-running backend.
-   */
-  for (uint32_t object_key = 0; object_key < object_keys_length; object_key++) {
-    JS_FreeAtom(ctx, tab[object_key].atom);
-  }
-  js_free(ctx, tab);
+  pljs_free_prop_enum(ctx, tab, object_keys_length);
 
   // Push that we are at the end of an object.
   value = jsonb_push(pstate, WJB_END_OBJECT, NULL);
