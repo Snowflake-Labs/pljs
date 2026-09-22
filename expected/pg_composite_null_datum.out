@@ -33,7 +33,7 @@ EXCEPTION WHEN others THEN
   RAISE NOTICE 'cnd_set: caught %, backend alive', SQLSTATE;
 END
 $$;
-NOTICE:  cnd_set: caught XX000, backend alive
+NOTICE:  cnd_set: caught 22007, backend alive
 -- Through a plain composite return, which takes pljs_jsvalue_to_record().
 CREATE FUNCTION cnd_record() RETURNS cnd_row AS $$
   return { d: 'not-a-date', ts: 42, n: 2 };

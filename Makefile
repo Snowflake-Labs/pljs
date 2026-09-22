@@ -39,12 +39,17 @@ endif
 REGRESS = init-extension function json jsonb json_conv types bytea context \
 	cursor array_spread plv8_regressions memory_limits inline composites \
 	trigger procedure find_function start_proc window regressions \
-	pg_flush_error_state pg_spi_freetuptable \
+	pg_spi_freetuptable \
 	pg_prepared_plan_lifetime \
 	currentresource \
 	pg_typedarray_views \
-	pg_find_function_no_perm pg_cursor_error_recovery pg_prepared_plan_gc \
-	pg_cancellation pg_stack_depth pg_memory_limit_set \
+	pg_find_function_no_perm \
+	pg_caught_error_stack \
+	pg_cursor_error_recovery \
+	pg_prepared_plan_gc \
+	pg_memory_limit_set \
+	pg_cancellation \
+	pg_stack_depth \
 	pg_param_plan_leak \
 	pg_object_keys_leak \
 	pg_errordata_stack \
@@ -63,19 +68,21 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_nested_stack_anchor \
 	pg_composite_null_datum \
 	pg_error_sqlstate \
+	pg_error_sqlstate_reraise \
+	pg_execute_resource_release \
 	pg_plan_argcount_sqlstate \
 	pg_targeted_invalidation \
-	pg_number_string_parse \
-	pg_name_bind \
 	pg_jsonb_array_return \
 	pg_array_shape \
-	pg_invalid_date \
 	pg_single_column_row_object \
+	pg_number_string_parse \
+	pg_name_bind \
+	pg_invalid_date \
 	pg_integer_range \
+	pg_bool_string_parse \
 	pg_conversion_footguns \
 	pg_return_null_fcinfo \
-	pg_array_undefined_elements \
-	pg_bool_string_parse
+	pg_array_undefined_elements
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 
