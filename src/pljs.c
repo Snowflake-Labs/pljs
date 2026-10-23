@@ -32,6 +32,8 @@ PG_FUNCTION_INFO_V1(pljs_call_handler);
 PG_FUNCTION_INFO_V1(pljs_call_validator);
 PG_FUNCTION_INFO_V1(pljs_inline_handler);
 
+static void free_javascript_arguments(JSContext *ctx, JSValueConst *argv,
+                                      int argc);
 static Datum call_function(PG_FUNCTION_ARGS, pljs_context *context,
                            JSValueConst *argv);
 static Datum call_srf_function(PG_FUNCTION_ARGS, pljs_context *context,
@@ -664,11 +666,14 @@ static void setup_start_proc(JSContext *ctx) {
  * @param fcinfo #FunctionCallInfo
  * @param proctuple #HeapTuple
  * @param context #pljs_context
- * @returns an array of #JSValueConst values of the function arguments
+ * @param argc set to the number of entries in the returned array
+ * @returns an array of #JSValueConst values of the function arguments, which
+ * the caller frees with free_javascript_arguments()
  */
 static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
                                                      HeapTuple proctuple,
-                                                     pljs_context *context) {
+                                                     pljs_context *context,
+                                                     int *argc) {
   char **arguments;
   Oid *argtypes = NULL;
   char *argmodes;
@@ -677,6 +682,7 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
   nargs = get_func_arg_info(proctuple, &argtypes, &arguments, &argmodes);
 
   JSValueConst *argv = (JSValueConst *)palloc(sizeof(JSValueConst) * nargs);
+  *argc = nargs;
   int inargs = 0;
 
   WindowObject window_obj = PG_WINDOW_OBJECT();
@@ -724,6 +730,30 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
   }
 
   return argv;
+}
+
+/**
+ * @brief Drops this call's references to its argument values.
+ *
+ * JS_Call() borrows its arguments rather than taking them over, so the values
+ * convert_arguments_to_javascript() created stay alive until the caller frees
+ * them.  Nothing did, which leaked every non-constant argument -- a string, an
+ * object -- for the rest of the session: a few dozen bytes per call that no
+ * garbage collection reclaims, and without bound in a backend that keeps
+ * calling.  Entries past the input arguments are JS_UNDEFINED, which is safe
+ * to free.  The array itself is not freed here: a procedure that committed may
+ * have taken the memory context it was allocated in with it.
+ *
+ * @param ctx #JSContext the values belong to
+ * @param argv #JSValueConst - the array convert_arguments_to_javascript() made
+ * @param argc number of entries in argv, as convert_arguments_to_javascript()
+ * reported it: a cached function's pljs_func does not carry its nargs
+ */
+static void free_javascript_arguments(JSContext *ctx, JSValueConst *argv,
+                                      int argc) {
+  for (int i = 0; i < argc; i++) {
+    JS_FreeValue(ctx, argv[i]);
+  }
 }
 
 /**
@@ -914,8 +944,9 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     retval = call_trigger(fcinfo, &context);
   } else {
     // Call as a function.
+    int argc;
     JSValueConst *argv =
-        convert_arguments_to_javascript(fcinfo, proctuple, &context);
+        convert_arguments_to_javascript(fcinfo, proctuple, &context, &argc);
 
     ReleaseSysCache(proctuple);
 
@@ -954,12 +985,14 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     PG_CATCH();
     {
       store_storage_in_context(&context, old_storage);
+      free_javascript_arguments(context.ctx, argv, argc);
       PG_RE_THROW();
     }
     PG_END_TRY();
 
     // Reset to the old storage now that the call is over.
     store_storage_in_context(&context, old_storage);
+    free_javascript_arguments(context.ctx, argv, argc);
   }
 
   return retval;
