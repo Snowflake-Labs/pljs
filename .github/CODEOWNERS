@@ -1,0 +1,4 @@
+# Default owners for every file. The last matching pattern wins, and this
+# rule is the fallback. The code-owners check requires the `*` rule to name
+# at least two people.
+* @sfc-gh-okalaci @sfc-gh-dachristensen
