@@ -52,6 +52,7 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_stack_depth \
 	pg_param_plan_leak \
 	pg_object_keys_leak \
+	pg_call_argument_leak \
 	pg_errordata_stack \
 	pg_return_next_null_row \
 	pg_column_name_mismatch \

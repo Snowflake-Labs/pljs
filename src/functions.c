@@ -563,7 +563,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
   ResourceOwner m_resowner;
   int status;
   bool cleanup_params = false;
-  ParamListInfo paramLI = NULL;
+  volatile ParamListInfo paramLI = NULL;
 
   if (argc) {
     if (JS_IsArray(ctx, argv[0])) {
